@@ -76,6 +76,35 @@
         </div>
     </div>
     
+    <!-- Integrations -->
+    <div class="section">
+        <h2>Integrations</h2>
+        <table>
+            <tr>
+                <td><strong>Authorize.net Webhook URL</strong></td>
+                <td><code style="color: #f39c12; background: #0f3460; padding: 4px 8px; border-radius: 4px;">{{ webhook_url }}</code></td>
+                <td><span class="badge badge-green">Ready</span></td>
+            </tr>
+            <tr>
+                <td><strong>Keap Email</strong></td>
+                <td>
+                    {% if keap_connected %}
+                        Connected
+                    {% else %}
+                        Not connected
+                    {% endif %}
+                </td>
+                <td>
+                    {% if keap_connected %}
+                        <span class="badge badge-green">Connected</span>
+                    {% else %}
+                        <a href="/admin/keap/connect" class="btn btn-sm btn-green">Connect Keap</a>
+                    {% endif %}
+                </td>
+            </tr>
+        </table>
+    </div>
+    
     <!-- Create License -->
     <div class="section">
         <h2>Create New License</h2>
