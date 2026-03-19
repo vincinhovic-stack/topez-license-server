@@ -161,10 +161,10 @@ async def validate_license(req: ValidateRequest):
     # ═══════════════════════════════════════════════════════════
     # 
     # Strategy:
-    # - NT8 sends machine_id (e.g. "DESKTOP-ABC_Leslie") → lock per machine
-    # - TS sends NO machine_id (empty string) → allow 1 TS activation without machine lock
-    # - Per key: max 1 NT8 machine + 1 TS (no machine_id) activation
-    # - machine_locks: {"nt8": "DESKTOP-ABC_Leslie", "ts_active": true}
+    # - NT8 sends machine_id WITHOUT "TS-" prefix (e.g. "DESKTOP-ABC_Leslie")
+    # - TS sends machine_id WITH "TS-" prefix (e.g. "TS-48271653-91037284")
+    # - Per key: max 1 NT8 machine + 1 TS device
+    # - machine_locks: {"nt8": "DESKTOP-ABC_Leslie", "ts": "TS-48271653-91037284"}
     
     if "machine_locks" not in lic:
         lic["machine_locks"] = {}
@@ -172,24 +172,32 @@ async def validate_license(req: ValidateRequest):
     locks = lic["machine_locks"]
 
     if machine_id:
-        # NT8 path: has machine_id
-        current_nt8_machine = locks.get("nt8", "")
-        if current_nt8_machine == "" or current_nt8_machine == machine_id:
-            # Lock to this machine (first time or same machine)
-            locks["nt8"] = machine_id
+        if machine_id.startswith("TS-"):
+            # TradeStation path: machine_id starts with "TS-"
+            current_ts_machine = locks.get("ts", "")
+            if current_ts_machine == "" or current_ts_machine == machine_id:
+                locks["ts"] = machine_id
+            else:
+                log_validation(db, key, machine_id, product_id, "denied",
+                              f"TS locked to {current_ts_machine}")
+                save_db(db)
+                return {
+                    "status": "denied",
+                    "reason": "License is locked to a different machine"
+                }
         else:
-            # Different machine - reject
-            log_validation(db, key, machine_id, product_id, "denied", 
-                          f"NT8 locked to {current_nt8_machine}")
-            save_db(db)
-            return {
-                "status": "denied",
-                "reason": "License is locked to a different machine"
-            }
-    else:
-        # TS path: no machine_id
-        # Allow one TS activation per key (no machine tracking)
-        locks["ts_active"] = True
+            # NinjaTrader path: no "TS-" prefix
+            current_nt8_machine = locks.get("nt8", "")
+            if current_nt8_machine == "" or current_nt8_machine == machine_id:
+                locks["nt8"] = machine_id
+            else:
+                log_validation(db, key, machine_id, product_id, "denied", 
+                              f"NT8 locked to {current_nt8_machine}")
+                save_db(db)
+                return {
+                    "status": "denied",
+                    "reason": "License is locked to a different machine"
+                }
 
     # Update last check
     lic["last_check"] = datetime.now().isoformat()
@@ -289,10 +297,10 @@ async def admin_dashboard(request: Request):
         locks = lic.get("machine_locks", {})
         if locks.get("nt8"):
             machine_info += f'NT8: {locks["nt8"]}'
-        if locks.get("ts_active"):
+        if locks.get("ts"):
             if machine_info:
                 machine_info += " | "
-            machine_info += "TS: active"
+            machine_info += f'TS: {locks["ts"]}'
         if not machine_info:
             machine_info = "-"
 
