@@ -824,11 +824,14 @@ async def tag_keap_contact(email: str, key: str, db: dict):
                 contact_id = contacts[0]["id"]
                 existing_fields = contacts[0].get("custom_fields", [])
             else:
-                # Create contact
+                # Create contact with marketable email status
                 resp = await client.post(
                     "https://api.infusionsoft.com/crm/rest/v1/contacts",
                     headers=headers,
-                    json={"email_addresses": [{"email": email, "field": "EMAIL1"}]}
+                    json={
+                        "email_addresses": [{"email": email, "field": "EMAIL1"}],
+                        "opt_in_reason": "Purchased TOP EZ Dashboard"
+                    }
                 )
                 result = resp.json()
                 contact_id = result.get("id")
@@ -866,12 +869,15 @@ async def tag_keap_contact(email: str, key: str, db: dict):
             if download_links_field_id:
                 custom_fields_update.append({"content": download_link, "id": download_links_field_id})
 
-            # Update contact with custom fields
+            # Update contact with custom fields and ensure marketable status
             if custom_fields_update:
                 update_resp = await client.patch(
                     f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}",
                     headers=headers,
-                    json={"custom_fields": custom_fields_update}
+                    json={
+                        "custom_fields": custom_fields_update,
+                        "opt_in_reason": "Purchased TOP EZ Dashboard"
+                    }
                 )
                 print(f"Keap: Updated custom fields for contact {contact_id}: {update_resp.status_code}")
                 if update_resp.status_code != 200:
