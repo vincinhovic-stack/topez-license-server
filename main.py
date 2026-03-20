@@ -831,49 +831,121 @@ async def keap_callback(request: Request, code: str = ""):
 
 
 async def tag_keap_contact(email: str, key: str, db: dict):
-    """Tag contact in Keap as license holder"""
+    """Tag contact in Keap as license holder and set license custom fields"""
     tokens = db.get("keap_tokens", {})
     access_token = tokens.get("access_token")
     if not access_token:
         print("Keap not connected - skipping tag")
         return
 
+    # Build download links
+    download_base = f"{BASE_URL}/api/download"
+    download_links = (
+        f"ME Dashboard (NinjaTrader 8): {download_base}/ME_Dashboard_NT8?key={key}\n"
+        f"HFT Dashboard (NinjaTrader 8): {download_base}/HFT_Dashboard_NT8?key={key}\n"
+        f"ME Dashboard (TradeStation): {download_base}/ME_Dashboard_TS?key={key}\n"
+        f"HFT Dashboard (TradeStation): {download_base}/HFT_Dashboard_TS?key={key}"
+    )
+
     try:
         async with httpx.AsyncClient() as client:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+
             # Find or create contact
             resp = await client.get(
-                f"https://api.infusionsoft.com/crm/rest/v1/contacts?email={email}",
-                headers={"Authorization": f"Bearer {access_token}"}
+                f"https://api.infusionsoft.com/crm/rest/v1/contacts?email={email}&optional_properties=custom_fields",
+                headers=headers
             )
             contacts = resp.json().get("contacts", [])
 
             if contacts:
                 contact_id = contacts[0]["id"]
+                existing_fields = contacts[0].get("custom_fields", [])
             else:
                 # Create contact
                 resp = await client.post(
                     "https://api.infusionsoft.com/crm/rest/v1/contacts",
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Content-Type": "application/json"
-                    },
+                    headers=headers,
                     json={"email_addresses": [{"email": email, "field": "EMAIL1"}]}
                 )
-                contact_id = resp.json().get("id")
+                result = resp.json()
+                contact_id = result.get("id")
+                existing_fields = result.get("custom_fields", [])
 
-            if contact_id:
-                # Apply tag (tag ID 1 = "Licensed Customer" - configure in Keap)
+            if not contact_id:
+                print("Keap: Could not find or create contact")
+                return
+
+            # Find custom field IDs by matching field name
+            license_key_field_id = None
+            download_links_field_id = None
+
+            # Get all custom fields from the contact model
+            model_resp = await client.get(
+                "https://api.infusionsoft.com/crm/rest/v1/contacts/model",
+                headers=headers
+            )
+            model_data = model_resp.json()
+            custom_fields_model = model_data.get("custom_fields", [])
+
+            for field in custom_fields_model:
+                label = field.get("label", "")
+                if "License Key" in label and "TOP EZ" in label:
+                    license_key_field_id = field.get("id")
+                    print(f"Keap: Found License Key field ID: {license_key_field_id}")
+                elif "Download Links" in label and "TOP EZ" in label:
+                    download_links_field_id = field.get("id")
+                    print(f"Keap: Found Download Links field ID: {download_links_field_id}")
+
+            # Build custom fields update array
+            custom_fields_update = []
+            if license_key_field_id:
+                custom_fields_update.append({"content": key, "id": license_key_field_id})
+            if download_links_field_id:
+                custom_fields_update.append({"content": download_links, "id": download_links_field_id})
+
+            # Update contact with custom fields
+            if custom_fields_update:
+                update_resp = await client.patch(
+                    f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}",
+                    headers=headers,
+                    json={"custom_fields": custom_fields_update}
+                )
+                print(f"Keap: Updated custom fields for contact {contact_id}: {update_resp.status_code}")
+                if update_resp.status_code != 200:
+                    print(f"Keap: Custom field update response: {update_resp.text}")
+            else:
+                print("Keap: Could not find custom field IDs - skipping field update")
+
+            # Find tag ID for "Licensed Customer"
+            tag_resp = await client.get(
+                "https://api.infusionsoft.com/crm/rest/v1/tags?name=Licensed Customer&limit=100",
+                headers=headers
+            )
+            tag_data = tag_resp.json()
+            tag_id = None
+            for tag in tag_data.get("tags", []):
+                if tag.get("name") == "Licensed Customer":
+                    tag_id = tag["id"]
+                    break
+
+            if tag_id:
                 await client.post(
                     f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}/tags",
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Content-Type": "application/json"
-                    },
-                    json={"tagIds": [1]}
+                    headers=headers,
+                    json={"tagIds": [tag_id]}
                 )
-                print(f"Keap: Tagged contact {contact_id} ({email})")
+                print(f"Keap: Tagged contact {contact_id} with 'Licensed Customer' (tag {tag_id})")
+            else:
+                print("Keap: Tag 'Licensed Customer' not found - skipping tag")
+
     except Exception as e:
         print(f"Keap tag error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ═══════════════════════════════════════════════════════════════
