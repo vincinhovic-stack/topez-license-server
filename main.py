@@ -837,18 +837,6 @@ async def tag_keap_contact(email: str, key: str, db: dict):
                 contact_id = result.get("id")
                 existing_fields = result.get("custom_fields", [])
 
-                # Explicitly opt-in the email to make it marketable
-                if contact_id:
-                    try:
-                        await client.put(
-                            f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}/emails/{email}/status",
-                            headers=headers,
-                            json={"status": "SingleOptIn", "reason": "Purchased TOP EZ Dashboard"}
-                        )
-                        print(f"Keap: Opted in email {email}")
-                    except Exception as oe:
-                        print(f"Keap: Opt-in error: {oe}")
-
             if not contact_id:
                 print("Keap: Could not find or create contact")
                 return
@@ -897,14 +885,25 @@ async def tag_keap_contact(email: str, key: str, db: dict):
             else:
                 print("Keap: Could not find custom field IDs - skipping field update")
 
-            # Ensure email is opted-in (marketable) for both new and existing contacts
+            # Opt-in email via XML-RPC API (REST API doesn't support opt-in)
             try:
-                optin_resp = await client.put(
-                    f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}/emails/{email}/status",
-                    headers=headers,
-                    json={"status": "SingleOptIn", "reason": "Purchased TOP EZ Dashboard"}
+                xml_payload = f"""<?xml version='1.0' encoding='UTF-8'?>
+<methodCall>
+<methodName>APIEmailService.optIn</methodName>
+<params>
+<param><value><string>{access_token}</string></value></param>
+<param><value><string>{email}</string></value></param>
+<param><value><string>Purchased TOP EZ Dashboard</string></value></param>
+</params>
+</methodCall>"""
+                optin_resp = await client.post(
+                    "https://api.infusionsoft.com/crm/xmlrpc/v1",
+                    content=xml_payload,
+                    headers={"Content-Type": "application/xml", "Authorization": f"Bearer {access_token}"}
                 )
-                print(f"Keap: Opt-in status for {email}: {optin_resp.status_code}")
+                print(f"Keap: XML-RPC Opt-in for {email}: {optin_resp.status_code}")
+                if "faultString" in optin_resp.text:
+                    print(f"Keap: Opt-in fault: {optin_resp.text[:200]}")
             except Exception as oe:
                 print(f"Keap: Opt-in error: {oe}")
 
