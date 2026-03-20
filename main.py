@@ -824,7 +824,7 @@ async def tag_keap_contact(email: str, key: str, db: dict):
                 contact_id = contacts[0]["id"]
                 existing_fields = contacts[0].get("custom_fields", [])
             else:
-                # Create contact with marketable email status
+                # Create contact with opted-in email status
                 resp = await client.post(
                     "https://api.infusionsoft.com/crm/rest/v1/contacts",
                     headers=headers,
@@ -836,6 +836,18 @@ async def tag_keap_contact(email: str, key: str, db: dict):
                 result = resp.json()
                 contact_id = result.get("id")
                 existing_fields = result.get("custom_fields", [])
+
+                # Explicitly opt-in the email to make it marketable
+                if contact_id:
+                    try:
+                        await client.put(
+                            f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}/emails/{email}/status",
+                            headers=headers,
+                            json={"status": "SingleOptIn", "reason": "Purchased TOP EZ Dashboard"}
+                        )
+                        print(f"Keap: Opted in email {email}")
+                    except Exception as oe:
+                        print(f"Keap: Opt-in error: {oe}")
 
             if not contact_id:
                 print("Keap: Could not find or create contact")
@@ -884,6 +896,17 @@ async def tag_keap_contact(email: str, key: str, db: dict):
                     print(f"Keap: Custom field update response: {update_resp.text}")
             else:
                 print("Keap: Could not find custom field IDs - skipping field update")
+
+            # Ensure email is opted-in (marketable) for both new and existing contacts
+            try:
+                optin_resp = await client.put(
+                    f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}/emails/{email}/status",
+                    headers=headers,
+                    json={"status": "SingleOptIn", "reason": "Purchased TOP EZ Dashboard"}
+                )
+                print(f"Keap: Opt-in status for {email}: {optin_resp.status_code}")
+            except Exception as oe:
+                print(f"Keap: Opt-in error: {oe}")
 
             # Find tag ID for "Licensed Customer"
             tag_resp = await client.get(
