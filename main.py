@@ -70,10 +70,7 @@ def load_db():
         "keap_tokens": {},
         "settings": {
             "product_files": {
-                "ME_Dashboard_NT8": "",
-                "HFT_Dashboard_NT8": "",
-                "ME_Dashboard_TS": "",
-                "HFT_Dashboard_TS": ""
+                "TOP_EZ_Complete": ""
             }
         }
     }
@@ -424,45 +421,17 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 </div>
 
 <!-- Product Files -->
-<h2>Product Files (for delivery)</h2>
+<h2>Product File (for delivery)</h2>
 <div class="section">
-<div class="file-grid">
-<div class="file-card">
-<h4>ME Dashboard - NinjaTrader 8</h4>
-<div class="file-status">{file_status.get('ME_Dashboard_NT8', '❌')}</div>
+<div class="file-card" style="max-width:500px">
+<h4>TOP EZ Dashboard Complete Package</h4>
+<div class="file-status">{file_status.get('TOP_EZ_Complete', '❌')}</div>
+<p style="font-size:12px;color:#888;margin:5px 0">Upload a single ZIP containing all 4 dashboard files (ME + HFT for NT8 and TradeStation)</p>
 <form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
-<input type="hidden" name="product_key" value="ME_Dashboard_NT8">
+<input type="hidden" name="product_key" value="TOP_EZ_Complete">
 <input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
 <button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
 </form>
-</div>
-<div class="file-card">
-<h4>HFT Dashboard - NinjaTrader 8</h4>
-<div class="file-status">{file_status.get('HFT_Dashboard_NT8', '❌')}</div>
-<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
-<input type="hidden" name="product_key" value="HFT_Dashboard_NT8">
-<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
-<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
-</form>
-</div>
-<div class="file-card">
-<h4>ME Dashboard - TradeStation</h4>
-<div class="file-status">{file_status.get('ME_Dashboard_TS', '❌')}</div>
-<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
-<input type="hidden" name="product_key" value="ME_Dashboard_TS">
-<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
-<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
-</form>
-</div>
-<div class="file-card">
-<h4>HFT Dashboard - TradeStation</h4>
-<div class="file-status">{file_status.get('HFT_Dashboard_TS', '❌')}</div>
-<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
-<input type="hidden" name="product_key" value="HFT_Dashboard_TS">
-<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
-<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
-</form>
-</div>
 </div>
 </div>
 
@@ -607,7 +576,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
 
-    valid_keys = ["ME_Dashboard_NT8", "HFT_Dashboard_NT8", "ME_Dashboard_TS", "HFT_Dashboard_TS"]
+    valid_keys = ["TOP_EZ_Complete"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
 
@@ -735,7 +704,7 @@ async def send_license_email(email: str, key: str, db: dict):
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
 
-        download_base = f"{BASE_URL}/api/download"
+        download_link = f"{BASE_URL}/api/download/TOP_EZ_Complete?key={key}"
         
         html = f"""
 <html><body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
@@ -745,17 +714,13 @@ async def send_license_email(email: str, key: str, db: dict):
 <div style="background: #f0f8ff; border: 2px solid #0066cc; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
 <code style="font-size: 24px; font-weight: bold; color: #333;">{key}</code>
 </div>
-<h3>Download Your Products:</h3>
-<ul>
-<li><a href="{download_base}/ME_Dashboard_NT8?key={key}">ME Dashboard - NinjaTrader 8</a></li>
-<li><a href="{download_base}/HFT_Dashboard_NT8?key={key}">HFT Dashboard - NinjaTrader 8</a></li>
-<li><a href="{download_base}/ME_Dashboard_TS?key={key}">ME Dashboard - TradeStation</a></li>
-<li><a href="{download_base}/HFT_Dashboard_TS?key={key}">HFT Dashboard - TradeStation</a></li>
-</ul>
+<h3>Download Your Dashboards:</h3>
+<p style="text-align: center;"><a href="{download_link}" style="display: inline-block; background: #0066cc; color: #fff; padding: 12px 30px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px;">Download TOP EZ Dashboard Package</a></p>
+<p style="text-align: center; color: #888; font-size: 12px;">Contains ME + HFT dashboards for both NinjaTrader 8 and TradeStation</p>
 <h3>Installation:</h3>
 <ol>
-<li>Download the ZIP file for your platform</li>
-<li>Extract and follow the installation guide inside</li>
+<li>Download and extract the ZIP file</li>
+<li>Install the dashboard for your platform (NinjaTrader 8 or TradeStation)</li>
 <li>Enter your license key when prompted</li>
 </ol>
 <p style="color: #888; font-size: 12px; margin-top: 30px; text-align: center;">
@@ -838,14 +803,8 @@ async def tag_keap_contact(email: str, key: str, db: dict):
         print("Keap not connected - skipping tag")
         return
 
-    # Build download links
-    download_base = f"{BASE_URL}/api/download"
-    download_links = (
-        f"ME Dashboard (NinjaTrader 8): {download_base}/ME_Dashboard_NT8?key={key}\n"
-        f"HFT Dashboard (NinjaTrader 8): {download_base}/HFT_Dashboard_NT8?key={key}\n"
-        f"ME Dashboard (TradeStation): {download_base}/ME_Dashboard_TS?key={key}\n"
-        f"HFT Dashboard (TradeStation): {download_base}/HFT_Dashboard_TS?key={key}"
-    )
+    # Build download link
+    download_link = f"{BASE_URL}/api/download/TOP_EZ_Complete?key={key}"
 
     try:
         async with httpx.AsyncClient() as client:
@@ -905,7 +864,7 @@ async def tag_keap_contact(email: str, key: str, db: dict):
             if license_key_field_id:
                 custom_fields_update.append({"content": key, "id": license_key_field_id})
             if download_links_field_id:
-                custom_fields_update.append({"content": download_links, "id": download_links_field_id})
+                custom_fields_update.append({"content": download_link, "id": download_links_field_id})
 
             # Update contact with custom fields
             if custom_fields_update:
