@@ -70,7 +70,7 @@ def load_db():
         "keap_tokens": {},
         "settings": {
             "product_files": {
-                "TOP_EZ_Complete": ""
+                "TOP_EZ_Dashboard": ""
             }
         }
     }
@@ -425,10 +425,10 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 <div class="section">
 <div class="file-card" style="max-width:500px">
 <h4>TOP EZ Dashboard Complete Package</h4>
-<div class="file-status">{file_status.get('TOP_EZ_Complete', '❌')}</div>
+<div class="file-status">{file_status.get('TOP_EZ_Dashboard', '❌')}</div>
 <p style="font-size:12px;color:#888;margin:5px 0">Upload a single ZIP containing all 4 dashboard files (ME + HFT for NT8 and TradeStation)</p>
 <form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
-<input type="hidden" name="product_key" value="TOP_EZ_Complete">
+<input type="hidden" name="product_key" value="TOP_EZ_Dashboard">
 <input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
 <button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
 </form>
@@ -576,7 +576,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
 
-    valid_keys = ["TOP_EZ_Complete"]
+    valid_keys = ["TOP_EZ_Dashboard"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
 
@@ -704,7 +704,7 @@ async def send_license_email(email: str, key: str, db: dict):
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
 
-        download_link = f"{BASE_URL}/api/download/TOP_EZ_Complete?key={key}"
+        download_link = f"{BASE_URL}/api/download/TOP_EZ_Dashboard?key={key}"
         
         html = f"""
 <html><body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
@@ -857,7 +857,7 @@ async def tag_keap_contact(email: str, key: str, db: dict):
         return
 
     # Build download link
-    download_link = f"{BASE_URL}/api/download/TOP_EZ_Complete?key={key}"
+    download_link = f"{BASE_URL}/api/download/TOP_EZ_Dashboard?key={key}"
 
     try:
         async with httpx.AsyncClient() as client:
