@@ -795,10 +795,63 @@ async def keap_callback(request: Request, code: str = ""):
     return RedirectResponse(url="/admin")
 
 
-async def tag_keap_contact(email: str, key: str, db: dict):
-    """Tag contact in Keap as license holder and set license custom fields"""
+async def get_valid_keap_token(db: dict) -> str:
+    """Get a valid Keap access token, refreshing if expired"""
     tokens = db.get("keap_tokens", {})
     access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    expires_at = tokens.get("expires_at", "")
+
+    if not access_token:
+        return None
+
+    # Check if token is expired or about to expire (5 min buffer)
+    try:
+        if expires_at:
+            exp = datetime.fromisoformat(expires_at)
+            if datetime.now() < exp - timedelta(minutes=5):
+                return access_token  # Still valid
+    except:
+        pass
+
+    # Token expired or no expiry info - try to refresh
+    if not refresh_token:
+        print("Keap: No refresh token available")
+        return access_token  # Try anyway
+
+    print("Keap: Token expired, refreshing...")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.infusionsoft.com/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": KEAP_CLIENT_ID,
+                    "client_secret": KEAP_CLIENT_SECRET
+                }
+            )
+            new_tokens = resp.json()
+            if "access_token" in new_tokens:
+                db["keap_tokens"] = {
+                    "access_token": new_tokens["access_token"],
+                    "refresh_token": new_tokens.get("refresh_token", refresh_token),
+                    "expires_at": (datetime.now() + timedelta(seconds=new_tokens.get("expires_in", 86400))).isoformat()
+                }
+                save_db(db)
+                print(f"Keap: Token refreshed successfully")
+                return new_tokens["access_token"]
+            else:
+                print(f"Keap: Token refresh failed: {new_tokens}")
+                return access_token
+    except Exception as e:
+        print(f"Keap: Token refresh error: {e}")
+        return access_token
+
+
+async def tag_keap_contact(email: str, key: str, db: dict):
+    """Tag contact in Keap as license holder and set license custom fields"""
+    access_token = await get_valid_keap_token(db)
     if not access_token:
         print("Keap not connected - skipping tag")
         return
