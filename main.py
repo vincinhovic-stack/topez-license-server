@@ -1,5 +1,5 @@
 """
-TOP EZ License Server v4
+TOP EZ License Server v5 - Multi-Product
 - License validation with per-platform machine locking (NT8 with machine_id, TS without)
 - Admin panel with license management
 - File upload for product delivery ZIPs (4 files: ME_NT8, HFT_NT8, ME_TS, HFT_TS)
@@ -70,7 +70,10 @@ def load_db():
         "keap_tokens": {},
         "settings": {
             "product_files": {
-                "TOP_EZ_Dashboard": ""
+                "NT8_ME": "",
+                "NT8_HFT": "",
+                "TS": "",
+                "PDF_Guides": ""
             }
         }
     }
@@ -421,18 +424,49 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 </div>
 
 <!-- Product Files -->
-<h2>Product File (for delivery)</h2>
-<div class="section">
-<div class="file-card" style="max-width:500px">
-<h4>TOP EZ Dashboard Complete Package</h4>
-<div class="file-status">{file_status.get('TOP_EZ_Dashboard', '❌')}</div>
-<p style="font-size:12px;color:#888;margin:5px 0">Upload a single ZIP containing all 4 dashboard files (ME + HFT for NT8 and TradeStation)</p>
+<h2>Product Files (for delivery)</h2>
+<div class="section" style="display:grid;grid-template-columns:1fr 1fr;gap:15px">
+
+<div class="file-card">
+<h4>NT8 ME Dashboard</h4>
+<div class="file-status">{file_status.get('NT8_ME', '❌')}</div>
 <form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
-<input type="hidden" name="product_key" value="TOP_EZ_Dashboard">
+<input type="hidden" name="product_key" value="NT8_ME">
 <input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
 <button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
 </form>
 </div>
+
+<div class="file-card">
+<h4>NT8 HFT Dashboard</h4>
+<div class="file-status">{file_status.get('NT8_HFT', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="NT8_HFT">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+<div class="file-card">
+<h4>TradeStation (ME + HFT)</h4>
+<div class="file-status">{file_status.get('TS', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+<div class="file-card">
+<h4>PDF Guides (NT8 + TS)</h4>
+<div class="file-status">{file_status.get('PDF_Guides', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="PDF_Guides">
+<input type="file" name="file" accept=".zip,.pdf" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
 </div>
 
 <!-- Create License -->
@@ -576,7 +610,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
 
-    valid_keys = ["TOP_EZ_Dashboard"]
+    valid_keys = ["NT8_ME", "NT8_HFT", "TS", "PDF_Guides"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
 
@@ -704,7 +738,10 @@ async def send_license_email(email: str, key: str, db: dict):
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
 
-        download_link = f"{BASE_URL}/api/download/TOP_EZ_Dashboard?key={key}"
+        dl_nt8_me = f"{BASE_URL}/api/download/NT8_ME?key={key}"
+        dl_nt8_hft = f"{BASE_URL}/api/download/NT8_HFT?key={key}"
+        dl_ts = f"{BASE_URL}/api/download/TS?key={key}"
+        dl_guides = f"{BASE_URL}/api/download/PDF_Guides?key={key}"
         
         html = f"""
 <html><body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
@@ -715,16 +752,20 @@ async def send_license_email(email: str, key: str, db: dict):
 <code style="font-size: 24px; font-weight: bold; color: #333;">{key}</code>
 </div>
 <h3>Download Your Dashboards:</h3>
-<p style="text-align: center;"><a href="{download_link}" style="display: inline-block; background: #0066cc; color: #fff; padding: 12px 30px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px;">Download TOP EZ Dashboard Package</a></p>
-<p style="text-align: center; color: #888; font-size: 12px;">Contains ME + HFT dashboards for both NinjaTrader 8 and TradeStation</p>
+<div style="margin: 20px 0;">
+<p style="margin: 10px 0;"><a href="{dl_nt8_me}" style="display: inline-block; background: #0066cc; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">1. NinjaTrader 8 - ME Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_nt8_hft}" style="display: inline-block; background: #0066cc; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">2. NinjaTrader 8 - HFT Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_ts}" style="display: inline-block; background: #28a745; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">3. TradeStation - ME + HFT Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_guides}" style="display: inline-block; background: #6c757d; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">4. PDF Installation Guides</a></p>
+</div>
 <h3>Installation:</h3>
 <ol>
-<li>Download and extract the ZIP file</li>
-<li>Install the dashboard for your platform (NinjaTrader 8 or TradeStation)</li>
-<li>Enter your license key when prompted</li>
+<li>Download the dashboard(s) for your platform</li>
+<li>Download the PDF Guide for step-by-step installation instructions</li>
+<li>Enter your license key when prompted on first launch</li>
 </ol>
 <p style="color: #888; font-size: 12px; margin-top: 30px; text-align: center;">
-This license is valid for one computer. If you need to transfer it, contact support.
+This license is valid for one computer per platform. If you need to transfer it, contact support.
 </p>
 </div></body></html>"""
 
@@ -857,7 +898,11 @@ async def tag_keap_contact(email: str, key: str, db: dict):
         return
 
     # Build download link
-    download_link = f"{BASE_URL}/api/download/TOP_EZ_Dashboard?key={key}"
+    dl_nt8_me = f"{BASE_URL}/api/download/NT8_ME?key={key}"
+    dl_nt8_hft = f"{BASE_URL}/api/download/NT8_HFT?key={key}"
+    dl_ts = f"{BASE_URL}/api/download/TS?key={key}"
+    dl_guides = f"{BASE_URL}/api/download/PDF_Guides?key={key}"
+    download_link = f"{dl_nt8_me}\n{dl_nt8_hft}\n{dl_ts}\n{dl_guides}"
 
     try:
         async with httpx.AsyncClient() as client:
