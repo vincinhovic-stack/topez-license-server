@@ -614,8 +614,14 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
 
-    # Save file
-    filename = f"{product_key}.zip"
+    # Save file with friendly names
+    upload_names = {
+        "NT8_ME": "TOPEZDashboard_ME.zip",
+        "NT8_HFT": "TOPEZDashboard_HFT.zip",
+        "TS": "TOPEZDASHBOARD_TS.zip",
+        "PDF_Guides": "TOPEZ_PDF_Guides.zip"
+    }
+    filename = upload_names.get(product_key, f"{product_key}.zip")
     filepath = os.path.join(UPLOADS_DIR, filename)
     content = await file.read()
     with open(filepath, "wb") as f:
