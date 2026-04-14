@@ -665,7 +665,15 @@ async def download_product(product_key: str, key: str = ""):
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     
-    return FileResponse(filepath, filename=filename, media_type="application/zip")
+    # Friendly download filenames for customers
+    download_names = {
+        "NT8_ME": "TOPEZDashboard_ME.zip",
+        "NT8_HFT": "TOPEZDashboard_HFT.zip",
+        "TS": "TOPEZDASHBOARD_TS.zip",
+        "PDF_Guides": "TOPEZ_PDF_Guides.zip"
+    }
+    friendly_name = download_names.get(product_key, filename)
+    return FileResponse(filepath, filename=friendly_name, media_type="application/zip")
 
 
 # ═══════════════════════════════════════════════════════════════
