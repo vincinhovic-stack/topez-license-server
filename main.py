@@ -2,7 +2,1204 @@
 TOP EZ License Server v5 - Multi-Product
 - License validation with per-platform machine locking (NT8 with machine_id, TS without)
 - Admin panel with license management
+- File upload for product deli"""
+TOP EZ License Server v5 - Multi-Product
+- License validation with per-platform machine locking (NT8 with machine_id, TS without)
+- Admin panel with license management
 - File upload for product delivery ZIPs (4 files: ME_NT8, HFT_NT8, ME_TS, HFT_TS)
+- Authorize.net webhook for auto-provisioning
+- Keap OAuth integration for CRM tagging
+- Email delivery of license key + download links to buyers
+"""
+
+import os
+import json
+import uuid
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Depends, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from typing import Optional, List
+import httpx
+
+# ═══════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════
+
+DATABASE_FILE = os.environ.get("DATABASE_FILE", "/data/licenses.json")
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "/data/uploads")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "topez2024admin")
+SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
+BASE_URL = os.environ.get("BASE_URL", "https://web-production-272d8.up.railway.app")
+
+# Known product IDs (used for admin product selection / license assignment).
+# NOTE: /api/validate is product-agnostic — it only checks whether a requested
+# product_id is present in a license's own "products" list. This list only drives
+# the admin UI checkboxes; it is not a global gate on validation.
+KNOWN_PRODUCTS = ["ME_Dashboard", "HFT_Dashboard", "DB_Runner_Dashboard"]
+PRODUCT_LABELS = {
+    "ME_Dashboard": "ME Dashboard",
+    "HFT_Dashboard": "HFT Dashboard",
+    "DB_Runner_Dashboard": "DB Runner Dashboard",
+}
+# Products pre-checked when creating a new license (business default).
+# DB Runner is intentionally NOT pre-checked until the subscription model is
+# decided with Leslie (separate license vs. bundled into the existing package).
+DEFAULT_NEW_LICENSE_PRODUCTS = ["ME_Dashboard", "HFT_Dashboard"]
+
+# Authorize.net
+AUTHORIZE_LOGIN_ID = os.environ.get("AUTHORIZE_LOGIN_ID", "9bx3f3rQHaq")
+
+# Keap
+KEAP_CLIENT_ID = os.environ.get("KEAP_CLIENT_ID", "lPsO8u88W6W6jIHpRhuRMxuwakHMavPneG6XMwPsEfsXMzC1")
+KEAP_CLIENT_SECRET = os.environ.get("KEAP_CLIENT_SECRET", "")
+KEAP_REDIRECT_URI = f"{BASE_URL}/admin/keap/callback"
+
+# SMTP (for email delivery)
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "")
+
+app = FastAPI(title="TOP EZ License Server", version="4.0")
+
+# Ensure directories exist
+Path(UPLOADS_DIR).mkdir(parents=True, exist_ok=True)
+Path(DATABASE_FILE).parent.mkdir(parents=True, exist_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# DATABASE
+# ═══════════════════════════════════════════════════════════════
+
+def load_db():
+    if os.path.exists(DATABASE_FILE):
+        with open(DATABASE_FILE, "r") as f:
+            return json.load(f)
+    return {
+        "licenses": {},
+        "validation_log": [],
+        "keap_tokens": {},
+        "settings": {
+            "product_files": {
+                "NT8_ME": "",
+                "NT8_HFT": "",
+                "NT8_DB_Runner": "",
+                "TS": "",
+                "PDF_Guides": ""
+            }
+        }
+    }
+
+def save_db(db):
+    with open(DATABASE_FILE, "w") as f:
+        json.dump(db, f, indent=2, default=str)
+
+def generate_key():
+    parts = [secrets.token_hex(2).upper() for _ in range(4)]
+    return f"TOPEZ-{parts[0]}-{parts[1]}-{parts[2]}-{parts[3]}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# MODELS
+# ═══════════════════════════════════════════════════════════════
+
+class ValidateRequest(BaseModel):
+    license_key: str
+    machine_id: Optional[str] = None
+    product_id: Optional[str] = None
+
+
+# ═══════════════════════════════════════════════════════════════
+# SESSION MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+
+active_sessions = {}
+
+def check_admin(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        raise HTTPException(status_code=303, headers={"Location": "/admin/login"})
+    if active_sessions[session_id]["expires"] < datetime.now():
+        del active_sessions[session_id]
+        raise HTTPException(status_code=303, headers={"Location": "/admin/login"})
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════
+# LICENSE VALIDATION API
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/api/validate")
+async def validate_license(req: ValidateRequest):
+    db = load_db()
+    key = req.license_key.strip()
+    machine_id = (req.machine_id or "").strip()
+    product_id = (req.product_id or "").strip()
+
+    # Find license
+    if key not in db["licenses"]:
+        log_validation(db, key, machine_id, product_id, "denied", "Key not found")
+        save_db(db)
+        return {"status": "denied", "reason": "Invalid license key"}
+
+    lic = db["licenses"][key]
+
+    # Check if active
+    if lic.get("status") != "active":
+        log_validation(db, key, machine_id, product_id, "denied", f"License {lic.get('status')}")
+        save_db(db)
+        return {"status": "denied", "reason": "License is not active"}
+
+    # Check expiry
+    if lic.get("expiry") and lic["expiry"] != "Never":
+        try:
+            exp_date = datetime.fromisoformat(lic["expiry"])
+            if datetime.now() > exp_date:
+                log_validation(db, key, machine_id, product_id, "denied", "Expired")
+                save_db(db)
+                return {"status": "denied", "reason": "License has expired"}
+        except:
+            pass
+
+    # Check product
+    products = lic.get("products", [])
+    if product_id and product_id not in products:
+        log_validation(db, key, machine_id, product_id, "denied", f"Product {product_id} not in {products}")
+        save_db(db)
+        return {"status": "denied", "reason": f"License not valid for {product_id}"}
+
+    # ═══════════════════════════════════════════════════════════
+    # MACHINE LOCKING LOGIC (per-platform)
+    # ═══════════════════════════════════════════════════════════
+    # 
+    # Strategy:
+    # - NT8 sends machine_id WITHOUT "TS-" prefix (e.g. "DESKTOP-ABC_Leslie")
+    # - TS sends machine_id WITH "TS-" prefix (e.g. "TS-48271653-91037284")
+    # - Per key: max 1 NT8 machine + 1 TS device
+    # - machine_locks: {"nt8": "DESKTOP-ABC_Leslie", "ts": "TS-48271653-91037284"}
+    
+    if "machine_locks" not in lic:
+        lic["machine_locks"] = {}
+
+    locks = lic["machine_locks"]
+
+    if machine_id:
+        if machine_id.startswith("TS-"):
+            # TradeStation path: machine_id starts with "TS-"
+            current_ts_machine = locks.get("ts", "")
+            if current_ts_machine == "" or current_ts_machine == machine_id:
+                locks["ts"] = machine_id
+            else:
+                log_validation(db, key, machine_id, product_id, "denied",
+                              f"TS locked to {current_ts_machine}")
+                save_db(db)
+                return {
+                    "status": "denied",
+                    "reason": "License is locked to a different machine"
+                }
+        else:
+            # NinjaTrader path: no "TS-" prefix
+            current_nt8_machine = locks.get("nt8", "")
+            if current_nt8_machine == "" or current_nt8_machine == machine_id:
+                locks["nt8"] = machine_id
+            else:
+                log_validation(db, key, machine_id, product_id, "denied", 
+                              f"NT8 locked to {current_nt8_machine}")
+                save_db(db)
+                return {
+                    "status": "denied",
+                    "reason": "License is locked to a different machine"
+                }
+
+    # Update last check
+    lic["last_check"] = datetime.now().isoformat()
+    lic["machine_locks"] = locks
+    db["licenses"][key] = lic
+
+    log_validation(db, key, machine_id or "(TS-no-machine)", product_id, "approved", "OK")
+    save_db(db)
+
+    return {"status": "approved", "message": "License valid"}
+
+
+def log_validation(db, key, machine_id, product_id, result, detail):
+    entry = {
+        "time": datetime.now().isoformat(),
+        "key": key[:15] + "..." if len(key) > 15 else key,
+        "machine": machine_id or "(none)",
+        "product": product_id or "(none)",
+        "result": result,
+        "detail": detail
+    }
+    if "validation_log" not in db:
+        db["validation_log"] = []
+    db["validation_log"].insert(0, entry)
+    # Keep last 100 entries
+    db["validation_log"] = db["validation_log"][:100]
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN: LOGIN
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/admin/login", response_class=HTMLResponse)
+async def admin_login_page():
+    return """<!DOCTYPE html>
+<html><head><title>TOP EZ License Server - Login</title>
+<style>
+body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+.login-box { background: #16213e; padding: 40px; border-radius: 12px; width: 350px; }
+h2 { text-align: center; color: #0ff; margin-bottom: 30px; }
+input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #333; border-radius: 6px; background: #0f3460; color: #fff; box-sizing: border-box; font-size: 16px; }
+button { width: 100%; padding: 12px; background: #0ff; color: #000; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; margin-top: 15px; }
+button:hover { background: #0dd; }
+</style></head><body>
+<div class="login-box">
+<h2>TOP EZ License Server</h2>
+<form method="POST" action="/admin/login">
+<input type="password" name="password" placeholder="Admin Password" required>
+<button type="submit">Login</button>
+</form></div></body></html>"""
+
+@app.post("/admin/login")
+async def admin_login(request: Request):
+    form = await request.form()
+    password = form.get("password", "")
+    if password == ADMIN_PASSWORD:
+        session_id = secrets.token_hex(32)
+        active_sessions[session_id] = {"expires": datetime.now() + timedelta(hours=24)}
+        response = RedirectResponse(url="/admin", status_code=303)
+        response.set_cookie("session_id", session_id, httponly=True, max_age=86400)
+        return response
+    return RedirectResponse(url="/admin/login", status_code=303)
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN: DASHBOARD
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+    if active_sessions[session_id]["expires"] < datetime.now():
+        return RedirectResponse(url="/admin/login")
+
+    db = load_db()
+    licenses = db.get("licenses", {})
+    logs = db.get("validation_log", [])[:20]
+    settings = db.get("settings", {})
+    product_files = settings.get("product_files", {})
+    keap_connected = bool(db.get("keap_tokens", {}).get("access_token"))
+
+    # Stats
+    total = len(licenses)
+    active = sum(1 for l in licenses.values() if l.get("status") == "active")
+    inactive = total - active
+
+    # Count leftover webhook junk licenses (webhook-...@unknown.com)
+    webhook_junk_count = sum(
+        1 for l in licenses.values()
+        if str(l.get("email", "")).startswith("webhook-") and str(l.get("email", "")).endswith("@unknown.com")
+    )
+
+    # Build license rows
+    # Download slots that actually have an uploaded file -> used to show
+    # copy-paste download links per license (skips slots with no file yet).
+    DOWNLOAD_SLOT_LABELS = {
+        "NT8_ME": "NT8 ME",
+        "NT8_HFT": "NT8 HFT",
+        "NT8_DB_Runner": "NT8 DB Runner",
+        "TS": "TradeStation",
+        "PDF_Guides": "PDF Guides",
+    }
+    available_slots = [
+        slot for slot in DOWNLOAD_SLOT_LABELS
+        if product_files.get(slot) and os.path.exists(os.path.join(UPLOADS_DIR, product_files.get(slot)))
+    ]
+
+    license_rows = ""
+    for key, lic in licenses.items():
+        current_products = lic.get("products", [])
+        checkboxes = ""
+        for pid in KNOWN_PRODUCTS:
+            checked = "checked" if pid in current_products else ""
+            label = PRODUCT_LABELS.get(pid, pid)
+            checkboxes += (
+                f'<label style="display:block;font-size:11px;white-space:nowrap">'
+                f'<input type="checkbox" name="products" value="{pid}" {checked}> {label}</label>'
+            )
+        products_html = (
+            f'<form method="POST" action="/admin/set-products" style="margin:0">'
+            f'<input type="hidden" name="key" value="{key}">'
+            f'{checkboxes}'
+            f'<button class="btn-primary" type="submit" style="font-size:11px;padding:3px 10px;margin-top:4px">Save</button>'
+            f'</form>'
+        )
+
+        # Copy-paste download links for this license (one per available product file)
+        if available_slots:
+            link_fields = ""
+            for slot in available_slots:
+                link = f"{BASE_URL}/api/download/{slot}?key={key}"
+                link_fields += (
+                    f'<div style="margin:3px 0">'
+                    f'<div style="font-size:10px;color:#6cf">{DOWNLOAD_SLOT_LABELS[slot]}</div>'
+                    f'<input readonly value="{link}" onclick="this.select();navigator.clipboard.writeText(this.value)" '
+                    f'title="Click to copy" style="width:250px;font-size:10px;padding:2px;background:#0d1b2a;color:#cde;border:1px solid #345">'
+                    f'</div>'
+                )
+            downloads_html = (
+                f'<details style="font-size:11px">'
+                f'<summary style="cursor:pointer;color:#0ff">Links</summary>'
+                f'<div style="margin-top:4px">{link_fields}</div>'
+                f'</details>'
+            )
+        else:
+            downloads_html = '<span style="font-size:11px;color:#888">No files uploaded</span>'
+        
+        machine_info = ""
+        locks = lic.get("machine_locks", {})
+        if locks.get("nt8"):
+            machine_info += f'NT8: {locks["nt8"]}'
+        if locks.get("ts"):
+            if machine_info:
+                machine_info += " | "
+            machine_info += f'TS: {locks["ts"]}'
+        if not machine_info:
+            machine_info = "-"
+
+        status_class = "active" if lic.get("status") == "active" else "inactive"
+        
+        license_rows += f"""<tr>
+<td><code>{key}</code></td>
+<td>{lic.get('email', '-')}</td>
+<td>{machine_info}</td>
+<td>{products_html}</td>
+<td><span class="status-{status_class}">{lic.get('status', 'unknown')}</span></td>
+<td>{lic.get('expiry', 'Never')}</td>
+<td>{lic.get('last_check', 'Never')[:16] if lic.get('last_check') else 'Never'}</td>
+<td>{lic.get('notes', '')}</td>
+<td>{downloads_html}</td>
+<td>
+<form method="POST" action="/admin/deactivate" style="display:inline">
+<input type="hidden" name="key" value="{key}">
+<button class="btn-danger" type="submit">Deactivate</button>
+</form>
+<form method="POST" action="/admin/reset-machine" style="display:inline">
+<input type="hidden" name="key" value="{key}">
+<button class="btn-warning" type="submit">Reset Machine</button>
+</form>
+<form method="POST" action="/admin/delete" style="display:inline">
+<input type="hidden" name="key" value="{key}">
+<button class="btn-delete" type="submit" onclick="return confirm('Delete this license?')">Delete</button>
+</form>
+</td></tr>"""
+
+    # Build log rows
+    log_rows = ""
+    for entry in logs:
+        result_class = "approved" if entry.get("result") == "approved" else "denied"
+        log_rows += f"""<tr>
+<td>{entry.get('time', '')[:19]}</td>
+<td><code>{entry.get('key', '')}</code></td>
+<td>{entry.get('machine', '')}</td>
+<td>{entry.get('product', '')}</td>
+<td><span class="result-{result_class}">{entry.get('result', '')}</span></td>
+</tr>"""
+
+    # Product files status
+    file_status = {}
+    for fname, fpath in product_files.items():
+        if fpath and os.path.exists(os.path.join(UPLOADS_DIR, fpath)):
+            file_status[fname] = f'✅ {fpath}'
+        else:
+            file_status[fname] = '❌ Not uploaded'
+
+    webhook_url = f"{BASE_URL}/api/webhook/authorize"
+
+    # Product checkboxes for the create-license form
+    create_product_checkboxes = ""
+    for pid in KNOWN_PRODUCTS:
+        checked = "checked" if pid in DEFAULT_NEW_LICENSE_PRODUCTS else ""
+        label = PRODUCT_LABELS.get(pid, pid)
+        create_product_checkboxes += (
+            f'<label style="display:block;font-size:13px;white-space:nowrap">'
+            f'<input type="checkbox" name="products" value="{pid}" {checked}> {label}</label>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html><head><title>TOP EZ License Server</title>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }}
+h1 {{ color: #0ff; margin-bottom: 5px; }}
+h2 {{ color: #0ff; margin-top: 30px; border-bottom: 1px solid #333; padding-bottom: 8px; }}
+.stats {{ display: flex; gap: 20px; margin: 20px 0; }}
+.stat-box {{ background: #16213e; padding: 20px 30px; border-radius: 10px; text-align: center; min-width: 120px; }}
+.stat-box .number {{ font-size: 36px; font-weight: bold; color: #0ff; }}
+.stat-box .label {{ font-size: 12px; color: #888; text-transform: uppercase; }}
+table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+th {{ background: #16213e; padding: 10px; text-align: left; color: #0ff; font-size: 12px; text-transform: uppercase; }}
+td {{ padding: 8px 10px; border-bottom: 1px solid #222; font-size: 13px; }}
+tr:hover {{ background: #16213e44; }}
+code {{ background: #0f3460; padding: 2px 6px; border-radius: 3px; font-size: 12px; }}
+.badge {{ background: #0f3460; color: #0ff; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin: 0 2px; display: inline-block; }}
+.status-active {{ background: #0a5; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 12px; }}
+.status-inactive {{ background: #a00; color: #fff; padding: 2px 10px; border-radius: 10px; font-size: 12px; }}
+.result-approved {{ color: #0f0; font-weight: bold; }}
+.result-denied {{ color: #f44; font-weight: bold; }}
+.btn-danger {{ background: #c00; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }}
+.btn-warning {{ background: #f80; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }}
+.btn-delete {{ background: #600; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }}
+.btn-success {{ background: #0a5; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold; }}
+.btn-primary {{ background: #06d; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }}
+input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; background: #0f3460; color: #fff; }}
+.form-row {{ display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin: 10px 0; }}
+.form-group {{ display: flex; flex-direction: column; gap: 4px; }}
+.form-group label {{ font-size: 11px; color: #888; text-transform: uppercase; }}
+.section {{ background: #16213e; padding: 20px; border-radius: 10px; margin: 15px 0; }}
+.copy-btn {{ background: #333; border: 1px solid #555; color: #fff; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }}
+.copy-btn:hover {{ background: #555; }}
+.file-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
+.file-card {{ background: #0f3460; padding: 15px; border-radius: 8px; }}
+.file-card h4 {{ margin: 0 0 10px 0; color: #0ff; font-size: 14px; }}
+.file-status {{ font-size: 12px; margin: 5px 0; }}
+.logout {{ float: right; color: #888; text-decoration: none; font-size: 13px; }}
+.logout:hover {{ color: #fff; }}
+</style></head><body>
+
+<a href="/admin/logout" class="logout">Logout</a>
+<h1>TOP EZ License Server</h1>
+
+<div class="stats">
+<div class="stat-box"><div class="number">{total}</div><div class="label">Total Licenses</div></div>
+<div class="stat-box"><div class="number">{active}</div><div class="label">Active</div></div>
+<div class="stat-box"><div class="number">{inactive}</div><div class="label">Inactive</div></div>
+</div>
+
+<!-- Integrations -->
+<h2>Integrations</h2>
+<div class="section">
+<div class="form-row">
+<div class="form-group">
+<label>Authorize.net Webhook URL</label>
+<div style="display:flex;gap:8px;align-items:center">
+<code id="webhookUrl">{webhook_url}</code>
+<button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('webhookUrl').textContent)">Copy</button>
+</div>
+</div>
+</div>
+<div class="form-row" style="margin-top:15px">
+<div class="form-group">
+<label>Keap Email</label>
+<span>{'Connected' if keap_connected else 'Not connected'}</span>
+</div>
+<a href="/admin/keap/connect"><button class="btn-primary">{'Reconnect' if keap_connected else 'Connect'} Keap</button></a>
+</div>
+</div>
+
+<!-- Product Files -->
+<h2>Product Files (for delivery)</h2>
+<div class="section" style="display:grid;grid-template-columns:1fr 1fr;gap:15px">
+
+<div class="file-card">
+<h4>NT8 ME Dashboard</h4>
+<div class="file-status">{file_status.get('NT8_ME', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="NT8_ME">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+<div class="file-card">
+<h4>NT8 HFT Dashboard</h4>
+<div class="file-status">{file_status.get('NT8_HFT', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="NT8_HFT">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+<div class="file-card">
+<h4>NT8 DB Runner Dashboard</h4>
+<div class="file-status">{file_status.get('NT8_DB_Runner', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="NT8_DB_Runner">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+<div class="file-card">
+<h4>TradeStation (ME + HFT)</h4>
+<div class="file-status">{file_status.get('TS', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+<div class="file-card">
+<h4>PDF Guides (NT8 + TS)</h4>
+<div class="file-status">{file_status.get('PDF_Guides', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="PDF_Guides">
+<input type="file" name="file" accept=".zip,.pdf" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+
+</div>
+
+<!-- Create License -->
+<h2>Create New License</h2>
+<div class="section">
+<form method="POST" action="/admin/create">
+<div class="form-row">
+<div class="form-group">
+<label>Email</label>
+<input type="email" name="email" placeholder="customer@email.com">
+</div>
+<div class="form-group">
+<label>Products</label>
+<div style="padding:4px 0">{create_product_checkboxes}</div>
+</div>
+<div class="form-group">
+<label>Expiry (YYYY-MM-DD or empty)</label>
+<input type="text" name="expiry" placeholder="Never">
+</div>
+<div class="form-group">
+<label>Notes</label>
+<input type="text" name="notes" placeholder="Optional note">
+</div>
+<button class="btn-success" type="submit">Generate Key</button>
+</div>
+</form>
+</div>
+
+<!-- Licenses -->
+<h2>Licenses</h2>
+<form method="POST" action="/admin/cleanup-webhooks" style="margin:0 0 12px 0">
+<button class="btn-danger" type="submit" onclick="return confirm('Delete {webhook_junk_count} leftover webhook-...@unknown.com license(s)? Real customer licenses are not affected.')" {"disabled" if webhook_junk_count == 0 else ""}>Clean up webhook entries ({webhook_junk_count})</button>
+</form>
+<table>
+<tr><th>Key</th><th>Email</th><th>Machine</th><th>Products</th><th>Status</th><th>Expiry</th><th>Last Check</th><th>Notes</th><th>Downloads</th><th>Actions</th></tr>
+{license_rows}
+</table>
+
+<!-- Validation Log -->
+<h2>Recent Validation Log</h2>
+<table>
+<tr><th>Time</th><th>Key</th><th>Machine</th><th>Product</th><th>Result</th></tr>
+{log_rows}
+</table>
+
+</body></html>"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN: ACTIONS
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/admin/logout")
+async def admin_logout(request: Request):
+    session_id = request.cookies.get("session_id")
+    if session_id and session_id in active_sessions:
+        del active_sessions[session_id]
+    response = RedirectResponse(url="/admin/login")
+    response.delete_cookie("session_id")
+    return response
+
+@app.post("/admin/create")
+async def admin_create(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    form = await request.form()
+    email = form.get("email", "")
+    products = [p for p in form.getlist("products") if p in KNOWN_PRODUCTS]
+    expiry = form.get("expiry", "").strip() or "Never"
+    notes = form.get("notes", "")
+
+    key = generate_key()
+    db = load_db()
+    db["licenses"][key] = {
+        "email": email,
+        "products": products,
+        "status": "active",
+        "expiry": expiry,
+        "notes": notes,
+        "created": datetime.now().isoformat(),
+        "last_check": None,
+        "machine_locks": {}
+    }
+    save_db(db)
+    return RedirectResponse(url="/admin", status_code=303)
+
+@app.post("/admin/set-products")
+async def admin_set_products(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    form = await request.form()
+    key = form.get("key")
+    products = [p for p in form.getlist("products") if p in KNOWN_PRODUCTS]
+
+    db = load_db()
+    if key in db["licenses"]:
+        db["licenses"][key]["products"] = products
+        save_db(db)
+    return RedirectResponse(url="/admin", status_code=303)
+
+@app.post("/admin/deactivate")
+async def admin_deactivate(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    form = await request.form()
+    key = form.get("key")
+    db = load_db()
+    if key in db["licenses"]:
+        db["licenses"][key]["status"] = "inactive"
+        save_db(db)
+    return RedirectResponse(url="/admin", status_code=303)
+
+@app.post("/admin/reset-machine")
+async def admin_reset_machine(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    form = await request.form()
+    key = form.get("key")
+    db = load_db()
+    if key in db["licenses"]:
+        db["licenses"][key]["machine_locks"] = {}
+        save_db(db)
+    return RedirectResponse(url="/admin", status_code=303)
+
+@app.post("/admin/delete")
+async def admin_delete(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    form = await request.form()
+    key = form.get("key")
+    db = load_db()
+    if key in db["licenses"]:
+        del db["licenses"][key]
+        save_db(db)
+    return RedirectResponse(url="/admin", status_code=303)
+
+
+@app.post("/admin/cleanup-webhooks")
+async def admin_cleanup_webhooks(request: Request):
+    """Delete leftover junk licenses created by webhook test pings
+    (email like webhook-...@unknown.com). Real customer licenses are untouched."""
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    db = load_db()
+    to_delete = [
+        k for k, l in db["licenses"].items()
+        if str(l.get("email", "")).startswith("webhook-") and str(l.get("email", "")).endswith("@unknown.com")
+    ]
+    for k in to_delete:
+        del db["licenses"][k]
+    if to_delete:
+        save_db(db)
+    print(f"Cleanup: removed {len(to_delete)} webhook junk license(s)")
+    return RedirectResponse(url="/admin", status_code=303)
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADMIN: PRODUCT FILE UPLOAD
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/admin/upload-product")
+async def upload_product(request: Request, product_key: str = Form(...), file: UploadFile = File(...)):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_DB_Runner", "TS", "PDF_Guides"]
+    if product_key not in valid_keys:
+        return RedirectResponse(url="/admin", status_code=303)
+
+    # Save file with friendly names
+    upload_names = {
+        "NT8_ME": "TOPEZDashboard_ME.zip",
+        "NT8_HFT": "TOPEZDashboard_HFT.zip",
+        "NT8_DB_Runner": "TOPEZDashboard_DB_Runner.zip",
+        "TS": "TOPEZDASHBOARD_TS.zip",
+        "PDF_Guides": "TOPEZ_PDF_Guides.zip"
+    }
+    filename = upload_names.get(product_key, f"{product_key}.zip")
+    filepath = os.path.join(UPLOADS_DIR, filename)
+    content = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(content)
+
+    # Update settings
+    db = load_db()
+    if "settings" not in db:
+        db["settings"] = {}
+    if "product_files" not in db["settings"]:
+        db["settings"]["product_files"] = {}
+    db["settings"]["product_files"][product_key] = filename
+    save_db(db)
+
+    return RedirectResponse(url="/admin", status_code=303)
+
+
+# ═══════════════════════════════════════════════════════════════
+# DOWNLOAD ENDPOINT (for product files)
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/download/{product_key}")
+async def download_product(product_key: str, key: str = ""):
+    """Download product file - requires valid license key as query param"""
+    if not key:
+        raise HTTPException(status_code=401, detail="License key required")
+
+    db = load_db()
+    
+    # Validate the key
+    if key not in db["licenses"]:
+        raise HTTPException(status_code=401, detail="Invalid license key")
+    
+    lic = db["licenses"][key]
+    if lic.get("status") != "active":
+        raise HTTPException(status_code=401, detail="License not active")
+
+    # Check product file exists
+    settings = db.get("settings", {})
+    product_files = settings.get("product_files", {})
+    filename = product_files.get(product_key, "")
+    
+    if not filename:
+        raise HTTPException(status_code=404, detail="Product file not available")
+    
+    filepath = os.path.join(UPLOADS_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Friendly download filenames for customers
+    download_names = {
+        "NT8_ME": "TOPEZDashboard_ME.zip",
+        "NT8_HFT": "TOPEZDashboard_HFT.zip",
+        "NT8_DB_Runner": "TOPEZDashboard_DB_Runner.zip",
+        "TS": "TOPEZDASHBOARD_TS.zip",
+        "PDF_Guides": "TOPEZ_PDF_Guides.zip"
+    }
+    friendly_name = download_names.get(product_key, filename)
+    return FileResponse(filepath, filename=friendly_name, media_type="application/zip")
+
+
+# ═══════════════════════════════════════════════════════════════
+# AUTHORIZE.NET WEBHOOK
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/api/webhook/authorize")
+async def authorize_webhook(request: Request):
+    """Handle Authorize.net payment notifications - auto-provision license"""
+    try:
+        body = await request.json()
+    except:
+        body = {}
+
+    # Extract customer email from webhook payload
+    email = ""
+    try:
+        # Authorize.net webhook format varies - try common paths
+        if "payload" in body:
+            payload = body["payload"]
+            if "customerEmail" in payload:
+                email = payload["customerEmail"]
+            elif "billTo" in payload:
+                email = payload["billTo"].get("email", "")
+        elif "customerEmail" in body:
+            email = body["customerEmail"]
+    except:
+        pass
+
+    # Guard: never auto-provision without a real customer email.
+    # Authorize.net test pings (and malformed events) arrive with no email and
+    # previously created junk "webhook-...@unknown.com" licenses. We skip those
+    # instead — a real purchase always carries an email; if one ever doesn't,
+    # the license can be created manually in the admin panel.
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        print(f"Webhook: no valid customer email in payload - skipping provisioning. Body: {json.dumps(body)[:200]}")
+        return {"status": "skipped", "reason": "no customer email"}
+
+    # Auto-generate license
+    key = generate_key()
+    db = load_db()
+    db["licenses"][key] = {
+        "email": email,
+        "products": ["ME_Dashboard", "HFT_Dashboard"],
+        "status": "active",
+        "expiry": "Never",
+        "notes": "Auto-provisioned via Authorize.net",
+        "created": datetime.now().isoformat(),
+        "last_check": None,
+        "machine_locks": {},
+        "webhook_data": json.dumps(body)[:500]
+    }
+    save_db(db)
+
+    # Try to send email with license key + download links
+    await send_license_email(email, key, db)
+
+    # Try to tag in Keap
+    await tag_keap_contact(email, key, db)
+
+    return {"status": "ok", "key": key}
+
+
+# ═══════════════════════════════════════════════════════════════
+# EMAIL DELIVERY
+# ═══════════════════════════════════════════════════════════════
+
+async def send_license_email(email: str, key: str, db: dict):
+    """Send license key and download links to customer"""
+    if not SMTP_HOST or not SMTP_USER:
+        print(f"SMTP not configured - skipping email to {email}")
+        return
+
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        dl_nt8_me = f"{BASE_URL}/api/download/NT8_ME?key={key}"
+        dl_nt8_hft = f"{BASE_URL}/api/download/NT8_HFT?key={key}"
+        dl_nt8_db_runner = f"{BASE_URL}/api/download/NT8_DB_Runner?key={key}"
+        dl_ts = f"{BASE_URL}/api/download/TS?key={key}"
+        dl_guides = f"{BASE_URL}/api/download/PDF_Guides?key={key}"
+        
+        html = f"""
+<html><body style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+<div style="max-width: 600px; margin: 0 auto; background: #fff; border-radius: 10px; padding: 30px;">
+<h1 style="color: #0066cc; text-align: center;">TOP EZ Dashboard</h1>
+<h2 style="text-align: center;">Your License Key</h2>
+<div style="background: #f0f8ff; border: 2px solid #0066cc; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+<code style="font-size: 24px; font-weight: bold; color: #333;">{key}</code>
+</div>
+<h3>Download Your Dashboards:</h3>
+<div style="margin: 20px 0;">
+<p style="margin: 10px 0;"><a href="{dl_nt8_me}" style="display: inline-block; background: #0066cc; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">1. NinjaTrader 8 - ME Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_nt8_hft}" style="display: inline-block; background: #0066cc; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">2. NinjaTrader 8 - HFT Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_nt8_db_runner}" style="display: inline-block; background: #0066cc; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">3. NinjaTrader 8 - DB Runner Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_ts}" style="display: inline-block; background: #28a745; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">4. TradeStation - ME + HFT Dashboard</a></p>
+<p style="margin: 10px 0;"><a href="{dl_guides}" style="display: inline-block; background: #6c757d; color: #fff; padding: 10px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; width: 100%; text-align: center; box-sizing: border-box;">5. PDF Installation Guides</a></p>
+</div>
+<h3>Installation:</h3>
+<ol>
+<li>Download the dashboard(s) for your platform</li>
+<li>Download the PDF Guide for step-by-step installation instructions</li>
+<li>Enter your license key when prompted on first launch</li>
+</ol>
+<p style="color: #888; font-size: 12px; margin-top: 30px; text-align: center;">
+This license is valid for one computer per platform. If you need to transfer it, contact support.
+</p>
+</div></body></html>"""
+
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = "Your TOP EZ Dashboard License Key"
+        msg["From"] = SMTP_FROM or SMTP_USER
+        msg["To"] = email
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        
+        print(f"License email sent to {email}")
+    except Exception as e:
+        print(f"Email send error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# KEAP OAUTH
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/admin/keap/connect")
+async def keap_connect(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    auth_url = (
+        f"https://accounts.infusionsoft.com/app/oauth/authorize"
+        f"?client_id={KEAP_CLIENT_ID}"
+        f"&redirect_uri={KEAP_REDIRECT_URI}"
+        f"&response_type=code"
+        f"&scope=full"
+    )
+    return RedirectResponse(url=auth_url)
+
+@app.get("/admin/keap/callback")
+async def keap_callback(request: Request, code: str = ""):
+    if not code:
+        return RedirectResponse(url="/admin")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.infusionsoft.com/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "client_id": KEAP_CLIENT_ID,
+                    "client_secret": KEAP_CLIENT_SECRET,
+                    "redirect_uri": KEAP_REDIRECT_URI
+                }
+            )
+            tokens = resp.json()
+    except Exception as e:
+        print(f"Keap token error: {e}")
+        return RedirectResponse(url="/admin")
+
+    db = load_db()
+    db["keap_tokens"] = {
+        "access_token": tokens.get("access_token", ""),
+        "refresh_token": tokens.get("refresh_token", ""),
+        "expires_at": (datetime.now() + timedelta(seconds=tokens.get("expires_in", 86400))).isoformat()
+    }
+    save_db(db)
+    return RedirectResponse(url="/admin")
+
+
+async def get_valid_keap_token(db: dict) -> str:
+    """Get a valid Keap access token, refreshing if expired"""
+    tokens = db.get("keap_tokens", {})
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    expires_at = tokens.get("expires_at", "")
+
+    if not access_token:
+        return None
+
+    # Check if token is expired or about to expire (5 min buffer)
+    try:
+        if expires_at:
+            exp = datetime.fromisoformat(expires_at)
+            if datetime.now() < exp - timedelta(minutes=5):
+                return access_token  # Still valid
+    except:
+        pass
+
+    # Token expired or no expiry info - try to refresh
+    if not refresh_token:
+        print("Keap: No refresh token available")
+        return access_token  # Try anyway
+
+    print("Keap: Token expired, refreshing...")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.infusionsoft.com/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": KEAP_CLIENT_ID,
+                    "client_secret": KEAP_CLIENT_SECRET
+                }
+            )
+            new_tokens = resp.json()
+            if "access_token" in new_tokens:
+                db["keap_tokens"] = {
+                    "access_token": new_tokens["access_token"],
+                    "refresh_token": new_tokens.get("refresh_token", refresh_token),
+                    "expires_at": (datetime.now() + timedelta(seconds=new_tokens.get("expires_in", 86400))).isoformat()
+                }
+                save_db(db)
+                print(f"Keap: Token refreshed successfully")
+                return new_tokens["access_token"]
+            else:
+                print(f"Keap: Token refresh failed: {new_tokens}")
+                return access_token
+    except Exception as e:
+        print(f"Keap: Token refresh error: {e}")
+        return access_token
+
+
+async def tag_keap_contact(email: str, key: str, db: dict):
+    """Tag contact in Keap as license holder and set license custom fields"""
+    access_token = await get_valid_keap_token(db)
+    if not access_token:
+        print("Keap not connected - skipping tag")
+        return
+
+    # Build download link
+    dl_nt8_me = f"{BASE_URL}/api/download/NT8_ME?key={key}"
+    dl_nt8_hft = f"{BASE_URL}/api/download/NT8_HFT?key={key}"
+    dl_nt8_db_runner = f"{BASE_URL}/api/download/NT8_DB_Runner?key={key}"
+    dl_ts = f"{BASE_URL}/api/download/TS?key={key}"
+    dl_guides = f"{BASE_URL}/api/download/PDF_Guides?key={key}"
+    download_link = f"{dl_nt8_me}\n{dl_nt8_hft}\n{dl_nt8_db_runner}\n{dl_ts}\n{dl_guides}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+
+            # Find or create contact
+            resp = await client.get(
+                f"https://api.infusionsoft.com/crm/rest/v1/contacts?email={email}&optional_properties=custom_fields",
+                headers=headers
+            )
+            contacts = resp.json().get("contacts", [])
+
+            if contacts:
+                contact_id = contacts[0]["id"]
+                existing_fields = contacts[0].get("custom_fields", [])
+            else:
+                # Create contact with opted-in email status
+                resp = await client.post(
+                    "https://api.infusionsoft.com/crm/rest/v1/contacts",
+                    headers=headers,
+                    json={
+                        "email_addresses": [{"email": email, "field": "EMAIL1"}],
+                        "opt_in_reason": "Purchased TOP EZ Dashboard"
+                    }
+                )
+                result = resp.json()
+                contact_id = result.get("id")
+                existing_fields = result.get("custom_fields", [])
+
+            if not contact_id:
+                print("Keap: Could not find or create contact")
+                return
+
+            # Find custom field IDs by matching field name
+            license_key_field_id = None
+            download_links_field_id = None
+
+            # Get all custom fields from the contact model
+            model_resp = await client.get(
+                "https://api.infusionsoft.com/crm/rest/v1/contacts/model",
+                headers=headers
+            )
+            model_data = model_resp.json()
+            custom_fields_model = model_data.get("custom_fields", [])
+
+            for field in custom_fields_model:
+                label = field.get("label", "")
+                if "License Key" in label and "TOP EZ" in label:
+                    license_key_field_id = field.get("id")
+                    print(f"Keap: Found License Key field ID: {license_key_field_id}")
+                elif "Download Links" in label and "TOP EZ" in label:
+                    download_links_field_id = field.get("id")
+                    print(f"Keap: Found Download Links field ID: {download_links_field_id}")
+
+            # Build custom fields update array
+            custom_fields_update = []
+            if license_key_field_id:
+                custom_fields_update.append({"content": key, "id": license_key_field_id})
+            if download_links_field_id:
+                custom_fields_update.append({"content": download_link, "id": download_links_field_id})
+
+            # Update contact with custom fields and ensure marketable status
+            if custom_fields_update:
+                update_resp = await client.patch(
+                    f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}",
+                    headers=headers,
+                    json={
+                        "custom_fields": custom_fields_update,
+                        "opt_in_reason": "Purchased TOP EZ Dashboard"
+                    }
+                )
+                print(f"Keap: Updated custom fields for contact {contact_id}: {update_resp.status_code}")
+                if update_resp.status_code != 200:
+                    print(f"Keap: Custom field update response: {update_resp.text}")
+            else:
+                print("Keap: Could not find custom field IDs - skipping field update")
+
+            # Opt-in email via XML-RPC API (REST API doesn't support opt-in)
+            try:
+                xml_payload = f"""<?xml version='1.0' encoding='UTF-8'?>
+<methodCall>
+<methodName>APIEmailService.optIn</methodName>
+<params>
+<param><value><string>{access_token}</string></value></param>
+<param><value><string>{email}</string></value></param>
+<param><value><string>Purchased TOP EZ Dashboard</string></value></param>
+</params>
+</methodCall>"""
+                optin_resp = await client.post(
+                    "https://api.infusionsoft.com/crm/xmlrpc/v1",
+                    content=xml_payload,
+                    headers={"Content-Type": "application/xml", "Authorization": f"Bearer {access_token}"}
+                )
+                print(f"Keap: XML-RPC Opt-in for {email}: {optin_resp.status_code}")
+                if "faultString" in optin_resp.text:
+                    print(f"Keap: Opt-in fault: {optin_resp.text[:200]}")
+            except Exception as oe:
+                print(f"Keap: Opt-in error: {oe}")
+
+            # Find tag ID for "Licensed Customer"
+            tag_resp = await client.get(
+                "https://api.infusionsoft.com/crm/rest/v1/tags?name=Licensed Customer&limit=100",
+                headers=headers
+            )
+            tag_data = tag_resp.json()
+            tag_id = None
+            for tag in tag_data.get("tags", []):
+                if tag.get("name") == "Licensed Customer":
+                    tag_id = tag["id"]
+                    break
+
+            if tag_id:
+                await client.post(
+                    f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}/tags",
+                    headers=headers,
+                    json={"tagIds": [tag_id]}
+                )
+                print(f"Keap: Tagged contact {contact_id} with 'Licensed Customer' (tag {tag_id})")
+            else:
+                print("Keap: Tag 'Licensed Customer' not found - skipping tag")
+
+    except Exception as e:
+        print(f"Keap tag error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# ═══════════════════════════════════════════════════════════════
+# HEALTH CHECK
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "TOP EZ License Server", "version": "4.0"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}very ZIPs (4 files: ME_NT8, HFT_NT8, ME_TS, HFT_TS)
 - Authorize.net webhook for auto-provisioning
 - Keap OAuth integration for CRM tagging
 - Email delivery of license key + download links to buyers
