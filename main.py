@@ -302,6 +302,12 @@ async def admin_dashboard(request: Request):
     active = sum(1 for l in licenses.values() if l.get("status") == "active")
     inactive = total - active
 
+    # Count leftover webhook junk licenses (webhook-...@unknown.com)
+    webhook_junk_count = sum(
+        1 for l in licenses.values()
+        if str(l.get("email", "")).startswith("webhook-") and str(l.get("email", "")).endswith("@unknown.com")
+    )
+
     # Build license rows
     license_rows = ""
     for key, lic in licenses.items():
@@ -546,6 +552,9 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 
 <!-- Licenses -->
 <h2>Licenses</h2>
+<form method="POST" action="/admin/cleanup-webhooks" style="margin:0 0 12px 0">
+<button class="btn-danger" type="submit" onclick="return confirm('Delete {webhook_junk_count} leftover webhook-...@unknown.com license(s)? Real customer licenses are not affected.')" {"disabled" if webhook_junk_count == 0 else ""}>Clean up webhook entries ({webhook_junk_count})</button>
+</form>
 <table>
 <tr><th>Key</th><th>Email</th><th>Machine</th><th>Products</th><th>Status</th><th>Expiry</th><th>Last Check</th><th>Notes</th><th>Actions</th></tr>
 {license_rows}
@@ -660,6 +669,27 @@ async def admin_delete(request: Request):
     return RedirectResponse(url="/admin", status_code=303)
 
 
+@app.post("/admin/cleanup-webhooks")
+async def admin_cleanup_webhooks(request: Request):
+    """Delete leftover junk licenses created by webhook test pings
+    (email like webhook-...@unknown.com). Real customer licenses are untouched."""
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    db = load_db()
+    to_delete = [
+        k for k, l in db["licenses"].items()
+        if str(l.get("email", "")).startswith("webhook-") and str(l.get("email", "")).endswith("@unknown.com")
+    ]
+    for k in to_delete:
+        del db["licenses"][k]
+    if to_delete:
+        save_db(db)
+    print(f"Cleanup: removed {len(to_delete)} webhook junk license(s)")
+    return RedirectResponse(url="/admin", status_code=303)
+
+
 # ═══════════════════════════════════════════════════════════════
 # ADMIN: PRODUCT FILE UPLOAD
 # ═══════════════════════════════════════════════════════════════
@@ -771,8 +801,15 @@ async def authorize_webhook(request: Request):
     except:
         pass
 
-    if not email:
-        email = f"webhook-{datetime.now().strftime('%Y%m%d%H%M%S')}@unknown.com"
+    # Guard: never auto-provision without a real customer email.
+    # Authorize.net test pings (and malformed events) arrive with no email and
+    # previously created junk "webhook-...@unknown.com" licenses. We skip those
+    # instead — a real purchase always carries an email; if one ever doesn't,
+    # the license can be created manually in the admin panel.
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        print(f"Webhook: no valid customer email in payload - skipping provisioning. Body: {json.dumps(body)[:200]}")
+        return {"status": "skipped", "reason": "no customer email"}
 
     # Auto-generate license
     key = generate_key()
