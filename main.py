@@ -43,6 +43,22 @@ PRODUCT_LABELS = {
 # Bracket Pro is intentionally NOT pre-checked until the subscription model is
 # decided with Leslie (separate license vs. bundled into the existing package).
 DEFAULT_NEW_LICENSE_PRODUCTS = ["ME_Dashboard", "HFT_Dashboard"]
+
+# Keap-driven provisioning map. ClickFunnels/Keap knows what was bought; a Keap
+# campaign (triggered by the product tag) calls POST /api/keap/provision?product=<key>.
+# The server then provisions ONLY that product and writes the key + download links
+# back to Keap. keap_license_field_label = exact Keap custom-field label for this
+# product's license key (matched case-insensitively). CONFIRM the real label from
+# Keap; until then the write-back is skipped gracefully.
+PRODUCT_MAP = {
+    "bracket_pro": {
+        "products": ["Bracket_Pro_Dashboard"],
+        "keap_tag_id": 3266,                       # "06. Membership - EZ Bracket Pro"
+        "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_Guide"],
+        "keap_license_field_label": "TOP EZ Bracket Pro License Key",   # <-- CONFIRM exact Keap field label
+        "keap_links_field_label": "TOP EZ Bracket Pro Download Links",  # optional; set to "" to skip
+    },
+}
 # Authorize.net
 AUTHORIZE_LOGIN_ID = os.environ.get("AUTHORIZE_LOGIN_ID", "9bx3f3rQHaq")
 # Keap
@@ -55,6 +71,9 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", "")
+# Shared secret Keap must include when calling /api/keap/provision (query ?token= or
+# X-Provision-Token header). REQUIRED in production - without it anyone could mint keys.
+PROVISION_SECRET = os.environ.get("PROVISION_SECRET", "")
 app = FastAPI(title="TOP EZ License Server", version="4.0")
 # Ensure directories exist
 Path(UPLOADS_DIR).mkdir(parents=True, exist_ok=True)
@@ -75,8 +94,10 @@ def load_db():
                 "NT8_ME": "",
                 "NT8_HFT": "",
                 "NT8_Bracket_Pro": "",
+                "NT8_Market_Energy": "",
                 "TS": "",
-                "PDF_Guides": ""
+                "PDF_Guides": "",
+                "Bracket_Pro_Guide": ""
             }
         }
     }
@@ -266,8 +287,10 @@ async def admin_dashboard(request: Request):
         "NT8_ME": "NT8 ME",
         "NT8_HFT": "NT8 HFT",
         "NT8_Bracket_Pro": "NT8 Bracket Pro",
+        "NT8_Market_Energy": "NT8 Market Energy Setup",
         "TS": "TradeStation",
         "PDF_Guides": "PDF Guides",
+        "Bracket_Pro_Guide": "Bracket Pro Guide (PDF)",
     }
     available_slots = [
         slot for slot in DOWNLOAD_SLOT_LABELS
@@ -491,6 +514,24 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 <button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
 </form>
 </div>
+<div class="file-card">
+<h4>NT8 Market Energy Setup</h4>
+<div class="file-status">{file_status.get('NT8_Market_Energy', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="NT8_Market_Energy">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
+<h4>Bracket Pro Guide (PDF)</h4>
+<div class="file-status">{file_status.get('Bracket_Pro_Guide', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="Bracket_Pro_Guide">
+<input type="file" name="file" accept=".pdf,.zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
 </div>
 <!-- Create License -->
 <h2>Create New License</h2>
@@ -643,7 +684,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
-    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "TS", "PDF_Guides"]
+    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "TS", "PDF_Guides", "Bracket_Pro_Guide"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
     # Save file with friendly names
@@ -651,8 +692,10 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
         "NT8_ME": "TOPEZDashboard_ME.zip",
         "NT8_HFT": "TOPEZDashboard_HFT.zip",
         "NT8_Bracket_Pro": "TOPEZDashboard_Bracket_Pro.zip",
+        "NT8_Market_Energy": "TOPEZ_Market_Energy_Setup.zip",
         "TS": "TOPEZDASHBOARD_TS.zip",
-        "PDF_Guides": "TOPEZ_PDF_Guides.zip"
+        "PDF_Guides": "TOPEZ_PDF_Guides.zip",
+        "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
     }
     filename = upload_names.get(product_key, f"{product_key}.zip")
     filepath = os.path.join(UPLOADS_DIR, filename)
@@ -702,11 +745,14 @@ async def download_product(product_key: str, key: str = ""):
         "NT8_ME": "TOPEZDashboard_ME.zip",
         "NT8_HFT": "TOPEZDashboard_HFT.zip",
         "NT8_Bracket_Pro": "TOPEZDashboard_Bracket_Pro.zip",
+        "NT8_Market_Energy": "TOPEZ_Market_Energy_Setup.zip",
         "TS": "TOPEZDASHBOARD_TS.zip",
-        "PDF_Guides": "TOPEZ_PDF_Guides.zip"
+        "PDF_Guides": "TOPEZ_PDF_Guides.zip",
+        "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
     }
     friendly_name = download_names.get(product_key, filename)
-    return FileResponse(filepath, filename=friendly_name, media_type="application/zip")
+    media_type = "application/pdf" if friendly_name.lower().endswith(".pdf") else "application/zip"
+    return FileResponse(filepath, filename=friendly_name, media_type=media_type)
 # ═══════════════════════════════════════════════════════════════
 # AUTHORIZE.NET WEBHOOK
 # ═══════════════════════════════════════════════════════════════
@@ -1037,6 +1083,111 @@ async def tag_keap_contact(email: str, key: str, db: dict):
         print(f"Keap tag error: {e}")
         import traceback
         traceback.print_exc()
+# ═══════════════════════════════════════════════════════════════
+# KEAP-DRIVEN PROVISIONING  (ClickFunnels/Keap -> server)
+# ═══════════════════════════════════════════════════════════════
+async def write_keap_license_fields(email: str, key: str, links: list, pm: dict, db: dict):
+    """Best-effort: write the license key (and optional download links) into the
+    product-specific Keap custom field(s). Skips gracefully if Keap is not connected
+    or the field label is not found."""
+    access_token = await get_valid_keap_token(db)
+    if not access_token:
+        print("Keap provision: not connected - skipping field write")
+        return
+    key_label = (pm.get("keap_license_field_label") or "").strip().lower()
+    links_label = (pm.get("keap_links_field_label") or "").strip().lower()
+    try:
+        async with httpx.AsyncClient() as client:
+            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            resp = await client.get(
+                f"https://api.infusionsoft.com/crm/rest/v1/contacts?email={email}&optional_properties=custom_fields",
+                headers=headers)
+            contacts = resp.json().get("contacts", [])
+            if contacts:
+                contact_id = contacts[0]["id"]
+            else:
+                resp = await client.post(
+                    "https://api.infusionsoft.com/crm/rest/v1/contacts",
+                    headers=headers,
+                    json={"email_addresses": [{"email": email, "field": "EMAIL1"}],
+                          "opt_in_reason": "Purchased TOP EZ Dashboard"})
+                contact_id = resp.json().get("id")
+            if not contact_id:
+                print("Keap provision: could not find/create contact")
+                return
+            model_resp = await client.get(
+                "https://api.infusionsoft.com/crm/rest/v1/contacts/model", headers=headers)
+            fields = model_resp.json().get("custom_fields", [])
+            key_field_id = None
+            links_field_id = None
+            for fld in fields:
+                lbl = (fld.get("label", "") or "").strip().lower()
+                if key_label and lbl == key_label:
+                    key_field_id = fld.get("id")
+                if links_label and lbl == links_label:
+                    links_field_id = fld.get("id")
+            updates = []
+            if key_field_id:
+                updates.append({"content": key, "id": key_field_id})
+            else:
+                print(f"Keap provision: license-key field {pm.get('keap_license_field_label')!r} not found - skipping key write")
+            if links_field_id and links:
+                updates.append({"content": "\n".join(links), "id": links_field_id})
+            if updates:
+                r = await client.patch(
+                    f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}",
+                    headers=headers, json={"custom_fields": updates})
+                print(f"Keap provision: wrote fields for contact {contact_id}: {r.status_code}")
+    except Exception as e:
+        print(f"Keap provision field-write error: {e}")
+
+
+@app.post("/api/keap/provision")
+async def keap_provision(request: Request, product: str = "bracket_pro", token: str = ""):
+    """Called by a Keap campaign (HTTP Post step) after the product tag is applied.
+    Provisions ONLY the purchased product and returns the license key + download links.
+    Keap sends the welcome email itself; this endpoint does not send email and does not
+    set the tag (Keap already set it - that is what triggered this call)."""
+    supplied = token or request.headers.get("X-Provision-Token", "")
+    if PROVISION_SECRET and supplied != PROVISION_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid provision token")
+    pm = PRODUCT_MAP.get(product)
+    if not pm:
+        raise HTTPException(status_code=400, detail=f"Unknown product {product!r}")
+    # email: accept JSON body, form, or query param (Keap HTTP-post format varies)
+    email = ""
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            email = body.get("email") or body.get("Email") or ""
+    except:
+        try:
+            form = await request.form()
+            email = form.get("email", "") or form.get("Email", "")
+        except:
+            pass
+    if not email:
+        email = request.query_params.get("email", "")
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    key = generate_key()
+    db = load_db()
+    db["licenses"][key] = {
+        "email": email,
+        "products": list(pm["products"]),
+        "status": "active",
+        "expiry": "Never",
+        "notes": f"Provisioned via Keap ({product})",
+        "created": datetime.now().isoformat(),
+        "last_check": None,
+        "machine_locks": {},
+    }
+    save_db(db)
+    links = [f"{BASE_URL}/api/download/{slot}?key={key}" for slot in pm.get("download_slots", [])]
+    await write_keap_license_fields(email, key, links, pm, db)
+    return {"status": "ok", "key": key, "products": pm["products"], "download_links": links}
+
 # ═══════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════
