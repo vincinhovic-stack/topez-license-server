@@ -59,6 +59,17 @@ PRODUCT_MAP = {
         "keap_links_field_label": "EZ Bracket Pro Download Link",  # Keap merge: [[contact.custom_fields.EZBracketProDownloadLink]]
     },
 }
+# Friendly labels for the download links written into Keap / the welcome email.
+DOWNLOAD_LABELS = {
+    "NT8_Bracket_Pro": "Bracket Pro Dashboard (NinjaTrader 8)",
+    "NT8_Market_Energy": "Market Energy Setup Indicator (NinjaTrader 8)",
+    "Bracket_Pro_Guide": "User Guide (PDF)",
+    "NT8_ME": "ME Dashboard (NinjaTrader 8)",
+    "NT8_HFT": "HFT Dashboard (NinjaTrader 8)",
+    "TS": "TradeStation",
+    "PDF_Guides": "User Guides (PDF)",
+}
+
 # Authorize.net
 AUTHORIZE_LOGIN_ID = os.environ.get("AUTHORIZE_LOGIN_ID", "9bx3f3rQHaq")
 # Keap
@@ -1086,7 +1097,7 @@ async def tag_keap_contact(email: str, key: str, db: dict):
 # ═══════════════════════════════════════════════════════════════
 # KEAP-DRIVEN PROVISIONING  (ClickFunnels/Keap -> server)
 # ═══════════════════════════════════════════════════════════════
-async def write_keap_license_fields(email: str, key: str, links: list, pm: dict, db: dict):
+async def write_keap_license_fields(email: str, key: str, links_text: str, pm: dict, db: dict):
     """Best-effort: write the license key (and optional download links) into the
     product-specific Keap custom field(s). Skips gracefully if Keap is not connected
     or the field label is not found."""
@@ -1131,8 +1142,8 @@ async def write_keap_license_fields(email: str, key: str, links: list, pm: dict,
                 updates.append({"content": key, "id": key_field_id})
             else:
                 print(f"Keap provision: license-key field {pm.get('keap_license_field_label')!r} not found - skipping key write")
-            if links_field_id and links:
-                updates.append({"content": "\n".join(links), "id": links_field_id})
+            if links_field_id and links_text:
+                updates.append({"content": links_text, "id": links_field_id})
             if updates:
                 r = await client.patch(
                     f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}",
@@ -1185,7 +1196,11 @@ async def keap_provision(request: Request, product: str = "bracket_pro", token: 
     }
     save_db(db)
     links = [f"{BASE_URL}/api/download/{slot}?key={key}" for slot in pm.get("download_slots", [])]
-    await write_keap_license_fields(email, key, links, pm, db)
+    # labelled + blank-line-separated block for the Keap "Download Link" field / email merge
+    links_text = "\n\n".join(
+        f"{DOWNLOAD_LABELS.get(slot, slot)}:\n{BASE_URL}/api/download/{slot}?key={key}"
+        for slot in pm.get("download_slots", []))
+    await write_keap_license_fields(email, key, links_text, pm, db)
     return {"status": "ok", "key": key, "products": pm["products"], "download_links": links}
 
 # ═══════════════════════════════════════════════════════════════
