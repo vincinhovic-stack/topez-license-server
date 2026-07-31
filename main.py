@@ -56,7 +56,14 @@ PRODUCT_MAP = {
         "keap_tag_id": 3266,                       # "06. Membership - EZ Bracket Pro"
         "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_Guide"],
         "keap_license_field_label": "EZ Bracket Pro License Key",   # Keap merge: [[contact.custom_fields.EZBracketProLicenseKey]]
-        "keap_links_field_label": "EZ Bracket Pro Download Link",  # Keap merge: [[contact.custom_fields.EZBracketProDownloadLink]]
+        "keap_links_field_label": "",  # combined field no longer used - individual fields below
+        # One Keap field per download. Matched by name, ignoring spaces/case, so either the
+        # label ("EZ Bracket Pro ...") or the merge tag ("EZBracketPro...") works.
+        "download_field_labels": {
+            "NT8_Bracket_Pro":   "EZBracketProDownloadLink",       # [[contact.custom_fields.EZBracketProDownloadLink]]
+            "NT8_Market_Energy": "EZBracketProMESetupIndicator",   # [[contact.custom_fields.EZBracketProMESetupIndicator]]
+            "Bracket_Pro_Guide": "EZBracketProUserGuide",          # [[contact.custom_fields.EZBracketProUserGuide]]
+        },
     },
 }
 # Friendly labels for the download links written into Keap / the welcome email.
@@ -1097,7 +1104,7 @@ async def tag_keap_contact(email: str, key: str, db: dict):
 # ═══════════════════════════════════════════════════════════════
 # KEAP-DRIVEN PROVISIONING  (ClickFunnels/Keap -> server)
 # ═══════════════════════════════════════════════════════════════
-async def write_keap_license_fields(email: str, key: str, links_text: str, pm: dict, db: dict):
+async def write_keap_license_fields(email: str, key: str, links_text: str, slot_links: dict, pm: dict, db: dict):
     """Best-effort: write the license key (and optional download links) into the
     product-specific Keap custom field(s). Skips gracefully if Keap is not connected
     or the field label is not found."""
@@ -1105,8 +1112,12 @@ async def write_keap_license_fields(email: str, key: str, links_text: str, pm: d
     if not access_token:
         print("Keap provision: not connected - skipping field write")
         return
-    key_label = (pm.get("keap_license_field_label") or "").strip().lower()
-    links_label = (pm.get("keap_links_field_label") or "").strip().lower()
+    def _norm(x):
+        return (x or "").replace(" ", "").strip().lower()
+    key_label = _norm(pm.get("keap_license_field_label"))
+    links_label = _norm(pm.get("keap_links_field_label"))
+    dl_field_labels = pm.get("download_field_labels") or {}
+    dl_label_to_slot = {_norm(lbl): slot for slot, lbl in dl_field_labels.items() if lbl}
     try:
         async with httpx.AsyncClient() as client:
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
@@ -1131,12 +1142,15 @@ async def write_keap_license_fields(email: str, key: str, links_text: str, pm: d
             fields = model_resp.json().get("custom_fields", [])
             key_field_id = None
             links_field_id = None
+            dl_slot_field = {}
             for fld in fields:
-                lbl = (fld.get("label", "") or "").strip().lower()
+                lbl = _norm(fld.get("label", ""))
                 if key_label and lbl == key_label:
                     key_field_id = fld.get("id")
                 if links_label and lbl == links_label:
                     links_field_id = fld.get("id")
+                if lbl in dl_label_to_slot:
+                    dl_slot_field[dl_label_to_slot[lbl]] = fld.get("id")
             updates = []
             if key_field_id:
                 updates.append({"content": key, "id": key_field_id})
@@ -1144,6 +1158,10 @@ async def write_keap_license_fields(email: str, key: str, links_text: str, pm: d
                 print(f"Keap provision: license-key field {pm.get('keap_license_field_label')!r} not found - skipping key write")
             if links_field_id and links_text:
                 updates.append({"content": links_text, "id": links_field_id})
+            for _slot, _fid in dl_slot_field.items():
+                _url = slot_links.get(_slot)
+                if _fid and _url:
+                    updates.append({"content": _url, "id": _fid})
             if updates:
                 r = await client.patch(
                     f"https://api.infusionsoft.com/crm/rest/v1/contacts/{contact_id}",
@@ -1195,12 +1213,12 @@ async def keap_provision(request: Request, product: str = "bracket_pro", token: 
         "machine_locks": {},
     }
     save_db(db)
-    links = [f"{BASE_URL}/api/download/{slot}?key={key}" for slot in pm.get("download_slots", [])]
-    # labelled + blank-line-separated block for the Keap "Download Link" field / email merge
+    slot_links = {slot: f"{BASE_URL}/api/download/{slot}?key={key}" for slot in pm.get("download_slots", [])}
+    links = list(slot_links.values())
+    # combined labelled + blank-line-separated block for the single "Download Link" field
     links_text = "\n\n".join(
-        f"{DOWNLOAD_LABELS.get(slot, slot)}:\n{BASE_URL}/api/download/{slot}?key={key}"
-        for slot in pm.get("download_slots", []))
-    await write_keap_license_fields(email, key, links_text, pm, db)
+        f"{DOWNLOAD_LABELS.get(slot, slot)}:\n{url}" for slot, url in slot_links.items())
+    await write_keap_license_fields(email, key, links_text, slot_links, pm, db)
     return {"status": "ok", "key": key, "products": pm["products"], "download_links": links}
 
 # ═══════════════════════════════════════════════════════════════
