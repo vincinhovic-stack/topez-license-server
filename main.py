@@ -55,8 +55,8 @@ PRODUCT_MAP = {
         "products": ["Bracket_Pro_Dashboard"],
         "keap_tag_id": 3266,                       # "06. Membership - EZ Bracket Pro"
         "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_Guide"],
-        "keap_license_field_label": "TOP EZ Bracket Pro License Key",   # <-- CONFIRM exact Keap field label
-        "keap_links_field_label": "TOP EZ Bracket Pro Download Links",  # optional; set to "" to skip
+        "keap_license_field_label": "EZ Bracket Pro License Key",   # Keap merge: [[contact.custom_fields.EZBracketProLicenseKey]]
+        "keap_links_field_label": "EZ Bracket Pro Download Link",  # Keap merge: [[contact.custom_fields.EZBracketProDownloadLink]]
     },
 }
 # Authorize.net
