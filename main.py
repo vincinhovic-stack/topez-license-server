@@ -547,7 +547,7 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 </div>
 <div class="file-card">
 <h4>Bracket Pro Dollars Profit</h4>
-<div class="file-status">{file_status.get('Bracket_Pro_DP', '\u274c')}</div>
+<div class="file-status">{file_status.get('Bracket_Pro_DP', '❌')}</div>
 <form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
 <input type="hidden" name="product_key" value="Bracket_Pro_DP">
 <input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
