@@ -54,7 +54,7 @@ PRODUCT_MAP = {
     "bracket_pro": {
         "products": ["Bracket_Pro_Dashboard"],
         "keap_tag_id": 3266,                       # "06. Membership - EZ Bracket Pro"
-        "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_Guide"],
+        "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "Bracket_Pro_Guide"],
         "keap_license_field_label": "EZ Bracket Pro License Key",   # Keap merge: [[contact.custom_fields.EZBracketProLicenseKey]]
         "keap_links_field_label": "",  # combined field no longer used - individual fields below
         # One Keap field per download. Matched by name, ignoring spaces/case, so either the
@@ -62,6 +62,7 @@ PRODUCT_MAP = {
         "download_field_labels": {
             "NT8_Bracket_Pro":   "EZBracketProDownloadLink",       # [[contact.custom_fields.EZBracketProDownloadLink]]
             "NT8_Market_Energy": "EZBracketProMESetupIndicator",   # [[contact.custom_fields.EZBracketProMESetupIndicator]]
+            "Bracket_Pro_DP":    "EZBracketProDollarsProfit",      # [[contact.custom_fields.EZBracketProDollarsProfit]]
             "Bracket_Pro_Guide": "EZBracketProUserGuide",          # [[contact.custom_fields.EZBracketProUserGuide]]
         },
     },
@@ -70,6 +71,7 @@ PRODUCT_MAP = {
 DOWNLOAD_LABELS = {
     "NT8_Bracket_Pro": "Bracket Pro Dashboard (NinjaTrader 8)",
     "NT8_Market_Energy": "Market Energy Setup Indicator (NinjaTrader 8)",
+    "Bracket_Pro_DP": "Bracket Pro Dollars Profit Indicator (NinjaTrader 8)",
     "Bracket_Pro_Guide": "User Guide (PDF)",
     "NT8_ME": "ME Dashboard (NinjaTrader 8)",
     "NT8_HFT": "HFT Dashboard (NinjaTrader 8)",
@@ -113,6 +115,7 @@ def load_db():
                 "NT8_HFT": "",
                 "NT8_Bracket_Pro": "",
                 "NT8_Market_Energy": "",
+                "Bracket_Pro_DP": "",
                 "TS": "",
                 "PDF_Guides": "",
                 "Bracket_Pro_Guide": ""
@@ -306,6 +309,7 @@ async def admin_dashboard(request: Request):
         "NT8_HFT": "NT8 HFT",
         "NT8_Bracket_Pro": "NT8 Bracket Pro",
         "NT8_Market_Energy": "NT8 Market Energy Setup",
+        "Bracket_Pro_DP": "Bracket Pro Dollars Profit",
         "TS": "TradeStation",
         "PDF_Guides": "PDF Guides",
         "Bracket_Pro_Guide": "Bracket Pro Guide (PDF)",
@@ -542,6 +546,15 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 </form>
 </div>
 <div class="file-card">
+<h4>Bracket Pro Dollars Profit</h4>
+<div class="file-status">{file_status.get('Bracket_Pro_DP', '\u274c')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="Bracket_Pro_DP">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
 <h4>Bracket Pro Guide (PDF)</h4>
 <div class="file-status">{file_status.get('Bracket_Pro_Guide', '❌')}</div>
 <form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
@@ -702,7 +715,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
-    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "TS", "PDF_Guides", "Bracket_Pro_Guide"]
+    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "TS", "PDF_Guides", "Bracket_Pro_Guide"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
     # Save file with friendly names
@@ -711,6 +724,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
         "NT8_HFT": "TOPEZDashboard_HFT.zip",
         "NT8_Bracket_Pro": "TOPEZDashboard_Bracket_Pro.zip",
         "NT8_Market_Energy": "TOPEZ_Market_Energy_Setup.zip",
+        "Bracket_Pro_DP": "TOPEZ_Bracket_Pro_Dollars_Profit.zip",
         "TS": "TOPEZDASHBOARD_TS.zip",
         "PDF_Guides": "TOPEZ_PDF_Guides.zip",
         "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
@@ -764,6 +778,7 @@ async def download_product(product_key: str, key: str = ""):
         "NT8_HFT": "TOPEZDashboard_HFT.zip",
         "NT8_Bracket_Pro": "TOPEZDashboard_Bracket_Pro.zip",
         "NT8_Market_Energy": "TOPEZ_Market_Energy_Setup.zip",
+        "Bracket_Pro_DP": "TOPEZ_Bracket_Pro_Dollars_Profit.zip",
         "TS": "TOPEZDASHBOARD_TS.zip",
         "PDF_Guides": "TOPEZ_PDF_Guides.zip",
         "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
