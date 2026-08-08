@@ -54,7 +54,7 @@ PRODUCT_MAP = {
     "bracket_pro": {
         "products": ["Bracket_Pro_Dashboard"],
         "keap_tag_id": 3266,                       # "06. Membership - EZ Bracket Pro"
-        "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "Bracket_Pro_Guide"],
+        "download_slots": ["NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "Bracket_Pro_Guide", "TS_Bracket_Pro", "TS_Market_Energy", "TS_Dollars_Profit", "TS_Guide"],
         "keap_license_field_label": "EZ Bracket Pro License Key",   # Keap merge: [[contact.custom_fields.EZBracketProLicenseKey]]
         "keap_links_field_label": "",  # combined field no longer used - individual fields below
         # One Keap field per download. Matched by name, ignoring spaces/case, so either the
@@ -64,6 +64,10 @@ PRODUCT_MAP = {
             "NT8_Market_Energy": "EZBracketProMESetupIndicator",   # [[contact.custom_fields.EZBracketProMESetupIndicator]]
             "Bracket_Pro_DP":    "EZBracketProDollarsProfit",      # [[contact.custom_fields.EZBracketProDollarsProfit]]
             "Bracket_Pro_Guide": "EZBracketProUserGuide",          # [[contact.custom_fields.EZBracketProUserGuide]]
+            "TS_Bracket_Pro":    "EZBracketProTSDownloadLink",     # [[contact.custom_fields.EZBracketProTSDownloadLink]]
+            "TS_Market_Energy":  "EZBracketProTSMESetup",          # [[contact.custom_fields.EZBracketProTSMESetup]]
+            "TS_Dollars_Profit": "EZBracketProTSDollarsProfit",    # [[contact.custom_fields.EZBracketProTSDollarsProfit]]
+            "TS_Guide":          "EZBracketProTSPDFGuide",         # [[contact.custom_fields.EZBracketProTSPDFGuide]]
         },
     },
 }
@@ -76,6 +80,10 @@ DOWNLOAD_LABELS = {
     "NT8_ME": "ME Dashboard (NinjaTrader 8)",
     "NT8_HFT": "HFT Dashboard (NinjaTrader 8)",
     "TS": "TradeStation",
+    "TS_Bracket_Pro": "Bracket Pro Dashboard (TradeStation)",
+    "TS_Market_Energy": "Market Energy Setup Indicator (TradeStation)",
+    "TS_Dollars_Profit": "Bracket Pro Dollars Profit Indicator (TradeStation)",
+    "TS_Guide": "User Guide (PDF)",
     "PDF_Guides": "User Guides (PDF)",
 }
 
@@ -117,9 +125,14 @@ def load_db():
                 "NT8_Market_Energy": "",
                 "Bracket_Pro_DP": "",
                 "TS": "",
+                "TS_Bracket_Pro": "",
+                "TS_Market_Energy": "",
+                "TS_Dollars_Profit": "",
+                "TS_Guide": "",
                 "PDF_Guides": "",
                 "Bracket_Pro_Guide": ""
-            }
+            },
+            "product_files_updated": {}
         }
     }
 def save_db(db):
@@ -291,6 +304,7 @@ async def admin_dashboard(request: Request):
     logs = db.get("validation_log", [])[:20]
     settings = db.get("settings", {})
     product_files = settings.get("product_files", {})
+    product_files_updated = settings.get("product_files_updated", {})
     keap_connected = bool(db.get("keap_tokens", {}).get("access_token"))
     # Stats
     total = len(licenses)
@@ -311,6 +325,10 @@ async def admin_dashboard(request: Request):
         "NT8_Market_Energy": "NT8 Market Energy Setup",
         "Bracket_Pro_DP": "Bracket Pro Dollars Profit",
         "TS": "TradeStation",
+        "TS_Bracket_Pro": "TS Bracket Pro",
+        "TS_Market_Energy": "TS Market Energy Setup",
+        "TS_Dollars_Profit": "TS Dollars Profit",
+        "TS_Guide": "TS Guide (PDF)",
         "PDF_Guides": "PDF Guides",
         "Bracket_Pro_Guide": "Bracket Pro Guide (PDF)",
     }
@@ -408,7 +426,10 @@ async def admin_dashboard(request: Request):
     file_status = {}
     for fname, fpath in product_files.items():
         if fpath and os.path.exists(os.path.join(UPLOADS_DIR, fpath)):
-            file_status[fname] = f'✅ {fpath}'
+            ts = product_files_updated.get(fname, "")
+            upd = (f'<br><span style="color:#8ad;font-size:11px">Last updated: {ts}</span>'
+                   if ts else '<br><span style="color:#c80;font-size:11px">Last updated: unknown</span>')
+            file_status[fname] = f'✅ {fpath}{upd}'
         else:
             file_status[fname] = '❌ Not uploaded'
     webhook_url = f"{BASE_URL}/api/webhook/authorize"
@@ -559,6 +580,42 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 <div class="file-status">{file_status.get('Bracket_Pro_Guide', '❌')}</div>
 <form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
 <input type="hidden" name="product_key" value="Bracket_Pro_Guide">
+<input type="file" name="file" accept=".pdf,.zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
+<h4>TS Bracket Pro Dashboard</h4>
+<div class="file-status">{file_status.get('TS_Bracket_Pro', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS_Bracket_Pro">
+<input type="file" name="file" accept=".eld,.zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
+<h4>TS Market Energy Setup</h4>
+<div class="file-status">{file_status.get('TS_Market_Energy', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS_Market_Energy">
+<input type="file" name="file" accept=".eld,.zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
+<h4>TS Dollars Profit</h4>
+<div class="file-status">{file_status.get('TS_Dollars_Profit', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS_Dollars_Profit">
+<input type="file" name="file" accept=".eld,.zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
+<h4>TS Bracket Pro Guide (PDF)</h4>
+<div class="file-status">{file_status.get('TS_Guide', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS_Guide">
 <input type="file" name="file" accept=".pdf,.zip" style="font-size:12px;margin:5px 0">
 <button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
 </form>
@@ -715,7 +772,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
-    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "TS", "PDF_Guides", "Bracket_Pro_Guide"]
+    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "TS", "TS_Bracket_Pro", "TS_Market_Energy", "TS_Dollars_Profit", "TS_Guide", "PDF_Guides", "Bracket_Pro_Guide"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
     # Save file with friendly names
@@ -726,6 +783,10 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
         "NT8_Market_Energy": "TOPEZ_Market_Energy_Setup.zip",
         "Bracket_Pro_DP": "TOPEZ_Bracket_Pro_Dollars_Profit.zip",
         "TS": "TOPEZDASHBOARD_TS.zip",
+        "TS_Bracket_Pro": "TOPEZ_Bracket_Pro_TS.eld",
+        "TS_Market_Energy": "TOPEZ_Market_Energy_Setup_TS.eld",
+        "TS_Dollars_Profit": "TOPEZ_Dollars_Profit_TS.eld",
+        "TS_Guide": "TOPEZ_Bracket_Pro_Guide_TS.pdf",
         "PDF_Guides": "TOPEZ_PDF_Guides.zip",
         "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
     }
@@ -741,6 +802,9 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     if "product_files" not in db["settings"]:
         db["settings"]["product_files"] = {}
     db["settings"]["product_files"][product_key] = filename
+    if "product_files_updated" not in db["settings"]:
+        db["settings"]["product_files_updated"] = {}
+    db["settings"]["product_files_updated"][product_key] = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     save_db(db)
     return RedirectResponse(url="/admin", status_code=303)
 # ═══════════════════════════════════════════════════════════════
@@ -780,11 +844,21 @@ async def download_product(product_key: str, key: str = ""):
         "NT8_Market_Energy": "TOPEZ_Market_Energy_Setup.zip",
         "Bracket_Pro_DP": "TOPEZ_Bracket_Pro_Dollars_Profit.zip",
         "TS": "TOPEZDASHBOARD_TS.zip",
+        "TS_Bracket_Pro": "TOPEZ_Bracket_Pro_TS.eld",
+        "TS_Market_Energy": "TOPEZ_Market_Energy_Setup_TS.eld",
+        "TS_Dollars_Profit": "TOPEZ_Dollars_Profit_TS.eld",
+        "TS_Guide": "TOPEZ_Bracket_Pro_Guide_TS.pdf",
         "PDF_Guides": "TOPEZ_PDF_Guides.zip",
         "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
     }
     friendly_name = download_names.get(product_key, filename)
-    media_type = "application/pdf" if friendly_name.lower().endswith(".pdf") else "application/zip"
+    _fn = friendly_name.lower()
+    if _fn.endswith(".pdf"):
+        media_type = "application/pdf"
+    elif _fn.endswith(".eld"):
+        media_type = "application/octet-stream"
+    else:
+        media_type = "application/zip"
     return FileResponse(filepath, filename=friendly_name, media_type=media_type)
 # ═══════════════════════════════════════════════════════════════
 # AUTHORIZE.NET WEBHOOK
