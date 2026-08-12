@@ -293,7 +293,7 @@ async def admin_login(request: Request):
 # ADMIN: DASHBOARD
 # ═══════════════════════════════════════════════════════════════
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request):
+async def admin_dashboard(request: Request, view: str = ""):
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
@@ -314,6 +314,38 @@ async def admin_dashboard(request: Request):
     webhook_junk_count = sum(
         1 for l in licenses.values()
         if str(l.get("email", "")).startswith("webhook-") and str(l.get("email", "")).endswith("@unknown.com")
+    )
+    # Duplicate licences: same email holding more than one active key. Counts the
+    # SURPLUS keys (a customer legitimately has one), so the button says exactly
+    # how many would be removed.
+    _by_email = {}
+    for _k, _l in licenses.items():
+        if _l.get("status") != "active":
+            continue
+        _e = str(_l.get("email", "")).strip().lower()
+        if not _e:
+            continue
+        _by_email.setdefault(_e, []).append(_k)
+    duplicate_count = sum(len(v) - 1 for v in _by_email.values() if len(v) > 1)
+    duplicate_emails = sum(1 for v in _by_email.values() if len(v) > 1)
+    # Keys that belong to an email holding more than one active licence
+    duplicate_keys = {k for v in _by_email.values() if len(v) > 1 for k in v}
+    # For each duplicated email, which key would "Merge" keep? Shown in the table so
+    # nothing is deleted blind. None means no key of that customer has ever been used,
+    # so the merge leaves them alone and they are handled by hand.
+    keeper_by_email = {}
+    unresolved_emails = set()
+    for _e, _keys in _by_email.items():
+        if len(_keys) < 2:
+            continue
+        _k = pick_keeper(licenses, _keys)
+        if _k:
+            keeper_by_email[_e] = _k
+        else:
+            unresolved_emails.add(_e)
+    unresolved_count = sum(len(_by_email[_e]) for _e in unresolved_emails)
+    mergeable_count = sum(
+        len(_by_email[_e]) - 1 for _e in keeper_by_email
     )
     # Build license rows
     # Download slots that actually have an uploaded file -> used to show
@@ -337,7 +369,23 @@ async def admin_dashboard(request: Request):
         if product_files.get(slot) and os.path.exists(os.path.join(UPLOADS_DIR, product_files.get(slot)))
     ]
     license_rows = ""
+    show_dupes_only = (view == "duplicates")
     for key, lic in licenses.items():
+        if show_dupes_only and key not in duplicate_keys:
+            continue
+        _email_l = str(lic.get("email", "")).strip().lower()
+        is_dupe = key in duplicate_keys
+        keeper = keeper_by_email.get(_email_l)
+        # Badge tells the operator what "Merge" would do with this row.
+        if not is_dupe:
+            dupe_badge = ""
+        elif keeper == key:
+            dupe_badge = '<div style="font-size:10px;color:#0f0;font-weight:bold">KEEP (in use)</div>'
+        elif keeper:
+            dupe_badge = '<div style="font-size:10px;color:#f80;font-weight:bold">duplicate &rarr; will be merged</div>'
+        else:
+            dupe_badge = '<div style="font-size:10px;color:#f55;font-weight:bold">duplicate &mdash; never activated, delete by hand</div>'
+        row_style = ' style="background:#3a2a00"' if is_dupe else ""
         current_products = lic.get("products", [])
         checkboxes = ""
         for pid in KNOWN_PRODUCTS:
@@ -387,8 +435,8 @@ async def admin_dashboard(request: Request):
             machine_info = "-"
         status_class = "active" if lic.get("status") == "active" else "inactive"
         
-        license_rows += f"""<tr>
-<td><code>{key}</code></td>
+        license_rows += f"""<tr{row_style}>
+<td><code>{key}</code>{dupe_badge}</td>
 <td>{lic.get('email', '-')}</td>
 <td>{machine_info}</td>
 <td>{products_html}</td>
@@ -648,9 +696,14 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 </div>
 <!-- Licenses -->
 <h2>Licenses</h2>
-<form method="POST" action="/admin/cleanup-webhooks" style="margin:0 0 12px 0">
+<form method="POST" action="/admin/cleanup-webhooks" style="margin:0 0 12px 0; display:inline-block">
 <button class="btn-danger" type="submit" onclick="return confirm('Delete {webhook_junk_count} leftover webhook-...@unknown.com license(s)? Real customer licenses are not affected.')" {"disabled" if webhook_junk_count == 0 else ""}>Clean up webhook entries ({webhook_junk_count})</button>
 </form>
+<form method="POST" action="/admin/merge-duplicates" style="margin:0 0 12px 8px; display:inline-block">
+<button class="btn-danger" type="submit" onclick="return confirm('Merge duplicates?\n\n{mergeable_count} surplus key(s) will be deleted. For each customer the key that is ACTUALLY IN USE is kept, and machine locks from the deleted keys are carried over, so nobody has to re-activate.\n\nCustomers whose keys were never activated are skipped and left for you to delete by hand.')" {"disabled" if mergeable_count == 0 else ""}>Merge duplicate licenses ({mergeable_count})</button>
+</form>
+<a href="/admin?view={"" if show_dupes_only else "duplicates"}" style="display:inline-block;margin:0 0 12px 8px;padding:8px 14px;border-radius:4px;text-decoration:none;background:{"#0a4" if show_dupes_only else "#345"};color:#fff;font-size:13px">{"Show all licenses" if show_dupes_only else f"Show duplicates only ({duplicate_count})"}</a>
+{f'<div style="margin:0 0 12px 0;padding:8px 12px;background:#3a1010;border-left:3px solid #f55;color:#fca;font-size:12px">{unresolved_count} key(s) belong to customers where no key was ever activated - the merge skips these, delete the unwanted ones by hand.</div>' if unresolved_count else ""}
 <table>
 <tr><th>Key</th><th>Email</th><th>Machine</th><th>Products</th><th>Status</th><th>Expiry</th><th>Last Check</th><th>Notes</th><th>Downloads</th><th>Actions</th></tr>
 {license_rows}
@@ -767,6 +820,70 @@ async def admin_cleanup_webhooks(request: Request):
 # ═══════════════════════════════════════════════════════════════
 # ADMIN: PRODUCT FILE UPLOAD
 # ═══════════════════════════════════════════════════════════════
+@app.post("/admin/merge-duplicates")
+async def admin_merge_duplicates(request: Request):
+    """Collapse multiple active licences for the same email down to one.
+
+    Keeps the OLDEST key per customer (that is the one already sitting in their
+    key file and in their welcome email) and carries over the machine locks from
+    the surplus keys, so an existing installation keeps working without the
+    customer having to re-activate. Only exact duplicate emails are touched.
+    """
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+
+    db = load_db()
+    licenses = db.get("licenses", {})
+
+    by_email = {}
+    for k, l in licenses.items():
+        if l.get("status") != "active":
+            continue
+        e = str(l.get("email", "")).strip().lower()
+        if not e:
+            continue
+        by_email.setdefault(e, []).append(k)
+
+    removed = 0
+    skipped = 0
+    for email, keys in by_email.items():
+        if len(keys) < 2:
+            continue
+        keep = pick_keeper(licenses, keys)
+        if keep is None:
+            # None of these keys was ever activated - no safe way to know which one
+            # the customer will use, so leave the decision to a human.
+            skipped += len(keys)
+            print(f"Merge: {email} skipped - none of {len(keys)} keys was ever activated")
+            continue
+        surplus = [k for k in keys if k != keep]
+
+        keep_rec = licenses[keep]
+        merged_products = set(keep_rec.get("products") or [])
+        merged_locks = dict(keep_rec.get("machine_locks") or {})
+
+        for k in surplus:
+            rec = licenses[k]
+            merged_products |= set(rec.get("products") or [])
+            for machine, val in (rec.get("machine_locks") or {}).items():
+                merged_locks.setdefault(machine, val)
+            del licenses[k]
+            removed += 1
+
+        keep_rec["products"] = sorted(merged_products)
+        keep_rec["machine_locks"] = merged_locks
+        note = str(keep_rec.get("notes") or "")
+        stamp = f"merged {len(surplus)} duplicate key(s) on {datetime.now().strftime('%Y-%m-%d')}"
+        keep_rec["notes"] = f"{note} | {stamp}".strip(" |")
+        print(f"Merge: {email} -> kept {keep}, removed {len(surplus)}")
+
+    if removed:
+        save_db(db)
+    print(f"Merge duplicates: removed {removed} surplus license(s), skipped {skipped} unactivated")
+    return RedirectResponse(url="/admin?view=duplicates" if skipped else "/admin", status_code=303)
+
+
 @app.post("/admin/upload-product")
 async def upload_product(request: Request, product_key: str = Form(...), file: UploadFile = File(...)):
     session_id = request.cookies.get("session_id")
@@ -893,12 +1010,18 @@ async def authorize_webhook(request: Request):
     if not email or "@" not in email:
         print(f"Webhook: no valid customer email in payload - skipping provisioning. Body: {json.dumps(body)[:200]}")
         return {"status": "skipped", "reason": "no customer email"}
-    # Auto-generate license
-    key = generate_key()
+    # Auto-generate license (idempotent: Authorize.net retries webhooks, and a
+    # duplicate delivery must not create a second key for the same customer)
     db = load_db()
+    wh_products = ["ME_Dashboard", "HFT_Dashboard"]
+    key, existing = find_existing_license(db, email, wh_products)
+    if existing is not None:
+        print(f"Webhook: {email} already holds active key {key} - not creating another")
+        return {"status": "ok", "key": key, "reused": True}
+    key = generate_key()
     db["licenses"][key] = {
         "email": email,
-        "products": ["ME_Dashboard", "HFT_Dashboard"],
+        "products": wh_products,
         "status": "active",
         "expiry": "Never",
         "notes": "Auto-provisioned via Authorize.net",
@@ -1261,6 +1384,53 @@ async def write_keap_license_fields(email: str, key: str, links_text: str, slot_
 
 
 @app.post("/api/keap/provision")
+def license_in_use(rec: dict) -> bool:
+    """Has this licence ever actually been activated on a machine?"""
+    if rec.get("last_check"):
+        return True
+    return bool(rec.get("machine_locks"))
+
+
+def pick_keeper(licenses: dict, keys: list):
+    """Choose which of a customer's duplicate keys to keep.
+
+    The key the customer is actually RUNNING wins - it sits in their key file, and
+    deleting it would lock them out. Oldest-first is only a tie-break for keys that
+    have never been used. Returns None when NONE of the keys was ever activated:
+    in that case there is no safe automatic answer, so the merge skips that customer
+    and leaves them for manual review.
+    """
+    used = [k for k in keys if license_in_use(licenses[k])]
+    if not used:
+        return None
+    if len(used) == 1:
+        return used[0]
+    # More than one activated: keep the most recently checked in.
+    used.sort(key=lambda k: licenses[k].get("last_check") or licenses[k].get("created") or "", reverse=True)
+    return used[0]
+
+
+def find_existing_license(db: dict, email: str, products: list):
+    """Return (key, record) of an ACTIVE licence already covering this email+products.
+
+    Provisioning must be idempotent: Keap retries a failed HTTP-post step, a campaign
+    can fire more than once, and a customer can be pushed through the funnel again.
+    Without this check every one of those events minted another key for the same
+    person, which is how a single user ended up holding four licences.
+    """
+    want = set(products or [])
+    email_l = (email or "").strip().lower()
+    for k, rec in (db.get("licenses") or {}).items():
+        if (rec.get("email") or "").strip().lower() != email_l:
+            continue
+        if rec.get("status") != "active":
+            continue
+        if want and not want.issubset(set(rec.get("products") or [])):
+            continue
+        return k, rec
+    return None, None
+
+
 async def keap_provision(request: Request, product: str = "bracket_pro", token: str = ""):
     """Called by a Keap campaign (HTTP Post step) after the product tag is applied.
     Provisions ONLY the purchased product and returns the license key + download links.
@@ -1289,26 +1459,34 @@ async def keap_provision(request: Request, product: str = "bracket_pro", token: 
     email = (email or "").strip()
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="Valid email required")
-    key = generate_key()
     db = load_db()
-    db["licenses"][key] = {
-        "email": email,
-        "products": list(pm["products"]),
-        "status": "active",
-        "expiry": "Never",
-        "notes": f"Provisioned via Keap ({product})",
-        "created": datetime.now().isoformat(),
-        "last_check": None,
-        "machine_locks": {},
-    }
-    save_db(db)
+    # Reuse an existing active licence for this customer + product instead of
+    # creating a second one. Re-sending the same key is harmless (the customer
+    # gets the links again); minting a new one is not.
+    key, existing = find_existing_license(db, email, pm["products"])
+    reused = existing is not None
+    if not reused:
+        key = generate_key()
+        db["licenses"][key] = {
+            "email": email,
+            "products": list(pm["products"]),
+            "status": "active",
+            "expiry": "Never",
+            "notes": f"Provisioned via Keap ({product})",
+            "created": datetime.now().isoformat(),
+            "last_check": None,
+            "machine_locks": {},
+        }
+        save_db(db)
+    else:
+        print(f"Provision: reusing existing key {key} for {email} ({product})")
     slot_links = {slot: f"{BASE_URL}/api/download/{slot}?key={key}" for slot in pm.get("download_slots", [])}
     links = list(slot_links.values())
     # combined labelled + blank-line-separated block for the single "Download Link" field
     links_text = "\n\n".join(
         f"{DOWNLOAD_LABELS.get(slot, slot)}:\n{url}" for slot, url in slot_links.items())
     await write_keap_license_fields(email, key, links_text, slot_links, pm, db)
-    return {"status": "ok", "key": key, "products": pm["products"], "download_links": links}
+    return {"status": "ok", "key": key, "reused": reused, "products": pm["products"], "download_links": links}
 
 # ═══════════════════════════════════════════════════════════════
 # HEALTH CHECK
