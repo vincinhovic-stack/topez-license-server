@@ -169,12 +169,14 @@ async def validate_license(req: ValidateRequest):
     key = req.license_key.strip()
     machine_id = (req.machine_id or "").strip()
     product_id = (req.product_id or "").strip()
-    # Find license
-    if key not in db["licenses"]:
+    # Find license (accepts merged alias keys, so an older key a customer still has
+    # saved on their PC keeps working after duplicates were merged)
+    primary_key, lic = resolve_license(db, key)
+    if lic is None:
         log_validation(db, key, machine_id, product_id, "denied", "Key not found")
         save_db(db)
         return {"status": "denied", "reason": "Invalid license key"}
-    lic = db["licenses"][key]
+    key = primary_key
     # Check if active
     if lic.get("status") != "active":
         log_validation(db, key, machine_id, product_id, "denied", f"License {lic.get('status')}")
@@ -334,18 +336,19 @@ async def admin_dashboard(request: Request, view: str = ""):
     # nothing is deleted blind. None means no key of that customer has ever been used,
     # so the merge leaves them alone and they are handled by hand.
     keeper_by_email = {}
-    unresolved_emails = set()
+    unresolved_reason = {}
     for _e, _keys in _by_email.items():
         if len(_keys) < 2:
             continue
-        _k = pick_keeper(licenses, _keys)
-        if _k:
-            keeper_by_email[_e] = _k
-        else:
-            unresolved_emails.add(_e)
-    unresolved_count = sum(len(_by_email[_e]) for _e in unresolved_emails)
-    mergeable_count = sum(
-        len(_by_email[_e]) - 1 for _e in keeper_by_email
+        _k, _why = pick_keeper(licenses, _keys)
+        keeper_by_email[_e] = _k
+        if _why:
+            unresolved_reason[_e] = _why
+    # Customers running more than one key at once - after the merge both of their
+    # keys stay valid on one record, which is worth saying out loud.
+    multi_use_emails = sum(
+        1 for _e, _ks in _by_email.items()
+        if len(_ks) > 1 and sum(1 for k in _ks if license_in_use(licenses[k])) > 1
     )
     # Build license rows
     # Download slots that actually have an uploaded file -> used to show
@@ -383,8 +386,10 @@ async def admin_dashboard(request: Request, view: str = ""):
             dupe_badge = '<div style="font-size:10px;color:#0f0;font-weight:bold">KEEP (in use)</div>'
         elif keeper:
             dupe_badge = '<div style="font-size:10px;color:#f80;font-weight:bold">duplicate &rarr; will be merged</div>'
+        elif license_in_use(lic):
+            dupe_badge = '<div style="font-size:10px;color:#f80;font-weight:bold">in use &rarr; folds in, key stays valid</div>'
         else:
-            dupe_badge = '<div style="font-size:10px;color:#f55;font-weight:bold">duplicate &mdash; never activated, delete by hand</div>'
+            dupe_badge = '<div style="font-size:10px;color:#fa0;font-weight:bold">duplicate &rarr; folds in</div>'
         row_style = ' style="background:#3a2a00"' if is_dupe else ""
         current_products = lic.get("products", [])
         checkboxes = ""
@@ -435,8 +440,17 @@ async def admin_dashboard(request: Request, view: str = ""):
             machine_info = "-"
         status_class = "active" if lic.get("status") == "active" else "inactive"
         
+        alt_html = ""
+        _alts = lic.get("alt_keys") or []
+        if _alts:
+            alt_html = (
+                '<div style="font-size:10px;color:#8ad;margin-top:3px">also valid:<br>'
+                + "<br>".join(f"<code>{a}</code>" for a in _alts)
+                + "</div>"
+            )
+
         license_rows += f"""<tr{row_style}>
-<td><code>{key}</code>{dupe_badge}</td>
+<td><code>{key}</code>{dupe_badge}{alt_html}</td>
 <td>{lic.get('email', '-')}</td>
 <td>{machine_info}</td>
 <td>{products_html}</td>
@@ -700,10 +714,10 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 <button class="btn-danger" type="submit" onclick="return confirm('Delete {webhook_junk_count} leftover webhook-...@unknown.com license(s)? Real customer licenses are not affected.')" {"disabled" if webhook_junk_count == 0 else ""}>Clean up webhook entries ({webhook_junk_count})</button>
 </form>
 <form method="POST" action="/admin/merge-duplicates" style="margin:0 0 12px 8px; display:inline-block">
-<button class="btn-danger" type="submit" onclick="return confirm('Merge duplicates?\n\n{mergeable_count} surplus key(s) will be deleted. For each customer the key that is ACTUALLY IN USE is kept, and machine locks from the deleted keys are carried over, so nobody has to re-activate.\n\nCustomers whose keys were never activated are skipped and left for you to delete by hand.')" {"disabled" if mergeable_count == 0 else ""}>Merge duplicate licenses ({mergeable_count})</button>
+<button class="btn-danger" type="submit" onclick="return confirm('Merge duplicates?\n\n{duplicate_count} extra row(s) will be folded into one record per customer.\n\nNobody is locked out: the extra key strings stay on the surviving record as additional valid keys, so any machine already running one of them keeps working. Products and machine locks are combined.')" {"disabled" if duplicate_count == 0 else ""}>Merge duplicate licenses ({duplicate_count})</button>
 </form>
 <a href="/admin?view={"" if show_dupes_only else "duplicates"}" style="display:inline-block;margin:0 0 12px 8px;padding:8px 14px;border-radius:4px;text-decoration:none;background:{"#0a4" if show_dupes_only else "#345"};color:#fff;font-size:13px">{"Show all licenses" if show_dupes_only else f"Show duplicates only ({duplicate_count})"}</a>
-{f'<div style="margin:0 0 12px 0;padding:8px 12px;background:#3a1010;border-left:3px solid #f55;color:#fca;font-size:12px">{unresolved_count} key(s) belong to customers where no key was ever activated - the merge skips these, delete the unwanted ones by hand.</div>' if unresolved_count else ""}
+{f'<div style="margin:0 0 12px 0;padding:8px 12px;background:#123018;border-left:3px solid #0a4;color:#bfe;font-size:12px">{multi_use_emails} customer(s) are running more than one key at the same time. Merging keeps ALL of their keys working: the extra ones stay on the surviving record as additional valid keys, so no installation has to be re-activated.</div>' if multi_use_emails else ""}
 <table>
 <tr><th>Key</th><th>Email</th><th>Machine</th><th>Products</th><th>Status</th><th>Expiry</th><th>Last Check</th><th>Notes</th><th>Downloads</th><th>Actions</th></tr>
 {license_rows}
@@ -846,42 +860,29 @@ async def admin_merge_duplicates(request: Request):
         by_email.setdefault(e, []).append(k)
 
     removed = 0
-    skipped = 0
     for email, keys in by_email.items():
         if len(keys) < 2:
             continue
-        keep = pick_keeper(licenses, keys)
-        if keep is None:
-            # None of these keys was ever activated - no safe way to know which one
-            # the customer will use, so leave the decision to a human.
-            skipped += len(keys)
-            print(f"Merge: {email} skipped - none of {len(keys)} keys was ever activated")
-            continue
+        keep, _why = pick_keeper(licenses, keys)
         surplus = [k for k in keys if k != keep]
-
         keep_rec = licenses[keep]
-        merged_products = set(keep_rec.get("products") or [])
-        merged_locks = dict(keep_rec.get("machine_locks") or {})
 
         for k in surplus:
-            rec = licenses[k]
-            merged_products |= set(rec.get("products") or [])
-            for machine, val in (rec.get("machine_locks") or {}).items():
-                merged_locks.setdefault(machine, val)
+            # Fold the row in but KEEP the key string alive as an alias, so any
+            # machine already running it carries on validating.
+            merge_into(keep_rec, keep, k, licenses[k])
             del licenses[k]
             removed += 1
 
-        keep_rec["products"] = sorted(merged_products)
-        keep_rec["machine_locks"] = merged_locks
         note = str(keep_rec.get("notes") or "")
         stamp = f"merged {len(surplus)} duplicate key(s) on {datetime.now().strftime('%Y-%m-%d')}"
         keep_rec["notes"] = f"{note} | {stamp}".strip(" |")
-        print(f"Merge: {email} -> kept {keep}, removed {len(surplus)}")
+        print(f"Merge: {email} -> primary {keep}, folded in {len(surplus)} as alt_keys")
 
     if removed:
         save_db(db)
-    print(f"Merge duplicates: removed {removed} surplus license(s), skipped {skipped} unactivated")
-    return RedirectResponse(url="/admin?view=duplicates" if skipped else "/admin", status_code=303)
+    print(f"Merge duplicates: folded {removed} surplus license(s) into their primary record")
+    return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.post("/admin/upload-product")
@@ -934,11 +935,11 @@ async def download_product(product_key: str, key: str = ""):
         raise HTTPException(status_code=401, detail="License key required")
     db = load_db()
     
-    # Validate the key
-    if key not in db["licenses"]:
+    # Validate the key (alias keys from merged duplicates are accepted too)
+    primary_key, lic = resolve_license(db, key)
+    if lic is None:
         raise HTTPException(status_code=401, detail="Invalid license key")
-    
-    lic = db["licenses"][key]
+    key = primary_key
     if lic.get("status") != "active":
         raise HTTPException(status_code=401, detail="License not active")
     # Check product file exists
@@ -1384,6 +1385,23 @@ async def write_keap_license_fields(email: str, key: str, links_text: str, slot_
 
 
 @app.post("/api/keap/provision")
+def resolve_license(db: dict, key: str):
+    """Resolve a key to (primary_key, record), following alias keys.
+
+    A licence record may carry extra keys in "alt_keys". Those are keys that were
+    merged into this record: the customer already has them saved in their key file
+    on some machine, so they must keep validating. Merging into one record means the
+    admin panel shows one row per customer without locking anybody out.
+    """
+    licenses = db.get("licenses", {})
+    if key in licenses:
+        return key, licenses[key]
+    for pk, rec in licenses.items():
+        if key in (rec.get("alt_keys") or []):
+            return pk, rec
+    return None, None
+
+
 def license_in_use(rec: dict) -> bool:
     """Has this licence ever actually been activated on a machine?"""
     if rec.get("last_check"):
@@ -1391,23 +1409,54 @@ def license_in_use(rec: dict) -> bool:
     return bool(rec.get("machine_locks"))
 
 
-def pick_keeper(licenses: dict, keys: list):
-    """Choose which of a customer's duplicate keys to keep.
+def merge_into(keep_rec: dict, keep_key: str, surplus_key: str, surplus_rec: dict):
+    """Fold a duplicate licence into the record we are keeping.
 
-    The key the customer is actually RUNNING wins - it sits in their key file, and
-    deleting it would lock them out. Oldest-first is only a tie-break for keys that
-    have never been used. Returns None when NONE of the keys was ever activated:
-    in that case there is no safe automatic answer, so the merge skips that customer
-    and leaves them for manual review.
+    The surplus KEY STRING is preserved in alt_keys so any machine already running
+    it keeps validating - only the extra row disappears. Products and machine locks
+    are unioned so nothing the customer paid for is lost.
+    """
+    alts = set(keep_rec.get("alt_keys") or [])
+    alts.add(surplus_key)
+    alts |= set(surplus_rec.get("alt_keys") or [])
+    alts.discard(keep_key)
+    keep_rec["alt_keys"] = sorted(alts)
+
+    keep_rec["products"] = sorted(set(keep_rec.get("products") or []) | set(surplus_rec.get("products") or []))
+
+    locks = dict(keep_rec.get("machine_locks") or {})
+    for machine, val in (surplus_rec.get("machine_locks") or {}).items():
+        locks.setdefault(machine, val)
+    keep_rec["machine_locks"] = locks
+
+    # keep the most recent activity stamp of the two
+    a, b = keep_rec.get("last_check"), surplus_rec.get("last_check")
+    if b and (not a or b > a):
+        keep_rec["last_check"] = b
+
+
+def pick_keeper(licenses: dict, keys: list):
+    """Choose which of a customer's duplicate keys can be merged automatically.
+
+    Safe in exactly ONE situation: only one of the keys has ever been activated.
+    That key is the one in the customer's key file; the others are unused, so
+    removing them changes nothing for them.
+
+    Nothing is ever locked out by this: the keys we do not keep are preserved as
+    alias keys on the surviving record, so any machine already running one of them
+    keeps validating. The choice below only decides which key becomes the PRIMARY
+    one shown in the admin panel and used in future emails.
+
+    Preference: a key that is actually in use (most recently checked in), otherwise
+    the oldest key - the one the customer most likely received first.
     """
     used = [k for k in keys if license_in_use(licenses[k])]
-    if not used:
-        return None
-    if len(used) == 1:
-        return used[0]
-    # More than one activated: keep the most recently checked in.
-    used.sort(key=lambda k: licenses[k].get("last_check") or licenses[k].get("created") or "", reverse=True)
-    return used[0]
+    pool = list(used) if used else list(keys)
+    if used:
+        pool.sort(key=lambda k: licenses[k].get("last_check") or licenses[k].get("created") or "", reverse=True)
+    else:
+        pool.sort(key=lambda k: licenses[k].get("created") or "9999")
+    return pool[0], ("" if used else "unused")
 
 
 def find_existing_license(db: dict, email: str, products: list):
