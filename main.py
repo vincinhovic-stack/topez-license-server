@@ -1424,10 +1424,23 @@ def merge_into(keep_rec: dict, keep_key: str, surplus_key: str, surplus_rec: dic
 
     keep_rec["products"] = sorted(set(keep_rec.get("products") or []) | set(surplus_rec.get("products") or []))
 
+    # Machine locks: one NT8 slot + one TS slot per record. If the duplicates were
+    # activated on DIFFERENT machines of the same platform, only one can survive -
+    # the other machine will be refused on its next start. Record that in the notes
+    # rather than dropping it silently, so it can be dealt with (reset the machine
+    # lock, or give that customer a second licence on purpose).
     locks = dict(keep_rec.get("machine_locks") or {})
+    displaced = []
     for machine, val in (surplus_rec.get("machine_locks") or {}).items():
-        locks.setdefault(machine, val)
+        existing = locks.get(machine)
+        if not existing:
+            locks[machine] = val
+        elif existing != val:
+            displaced.append(f"{machine}:{val}")
     keep_rec["machine_locks"] = locks
+    if displaced:
+        prev = str(keep_rec.get("notes") or "")
+        keep_rec["notes"] = (prev + " | displaced machine lock(s): " + ", ".join(displaced)).strip(" |")
 
     # keep the most recent activity stamp of the two
     a, b = keep_rec.get("last_check"), surplus_rec.get("last_check")
