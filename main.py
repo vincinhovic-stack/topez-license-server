@@ -76,15 +76,15 @@ DOWNLOAD_LABELS = {
     "NT8_Bracket_Pro": "Bracket Pro Dashboard (NinjaTrader 8)",
     "NT8_Market_Energy": "Market Energy Setup Indicator (NinjaTrader 8)",
     "Bracket_Pro_DP": "Bracket Pro Dollars Profit Indicator (NinjaTrader 8)",
-    "Bracket_Pro_Guide": "User Guide (PDF)",
+    "Bracket_Pro_Guide": "Bracket Pro User Guide - NinjaTrader 8 (PDF)",
     "NT8_ME": "ME Dashboard (NinjaTrader 8)",
     "NT8_HFT": "HFT Dashboard (NinjaTrader 8)",
     "TS": "TradeStation",
     "TS_Bracket_Pro": "Bracket Pro Dashboard (TradeStation)",
     "TS_Market_Energy": "Market Energy Setup Indicator (TradeStation)",
     "TS_Dollars_Profit": "Bracket Pro Dollars Profit Indicator (TradeStation)",
-    "TS_Guide": "User Guide (PDF)",
-    "PDF_Guides": "User Guides (PDF)",
+    "TS_Guide": "Bracket Pro User Guide - TradeStation (PDF)",
+    "PDF_Guides": "ME + HFT Dashboard User Guides (PDF)",
 }
 
 # Authorize.net
@@ -363,9 +363,9 @@ async def admin_dashboard(request: Request, view: str = ""):
         "TS_Bracket_Pro": "TS Bracket Pro",
         "TS_Market_Energy": "TS Market Energy Setup",
         "TS_Dollars_Profit": "TS Dollars Profit",
-        "TS_Guide": "TS Guide (PDF)",
-        "PDF_Guides": "PDF Guides",
-        "Bracket_Pro_Guide": "Bracket Pro Guide (PDF)",
+        "TS_Guide": "Bracket Pro Guide - TradeStation (PDF)",
+        "PDF_Guides": "ME + HFT Guides (PDF)",
+        "Bracket_Pro_Guide": "Bracket Pro Guide - NinjaTrader 8 (PDF)",
     }
     available_slots = [
         slot for slot in DOWNLOAD_SLOT_LABELS
@@ -1384,7 +1384,6 @@ async def write_keap_license_fields(email: str, key: str, links_text: str, slot_
         print(f"Keap provision field-write error: {e}")
 
 
-@app.post("/api/keap/provision")
 def resolve_license(db: dict, key: str):
     """Resolve a key to (primary_key, record), following alias keys.
 
@@ -1493,6 +1492,7 @@ def find_existing_license(db: dict, email: str, products: list):
     return None, None
 
 
+@app.post("/api/keap/provision")
 async def keap_provision(request: Request, product: str = "bracket_pro", token: str = ""):
     """Called by a Keap campaign (HTTP Post step) after the product tag is applied.
     Provisions ONLY the purchased product and returns the license key + download links.
