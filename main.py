@@ -1550,6 +1550,121 @@ async def keap_provision(request: Request, product: str = "bracket_pro", token: 
     await write_keap_license_fields(email, key, links_text, slot_links, pm, db)
     return {"status": "ok", "key": key, "reused": reused, "products": pm["products"], "download_links": links}
 
+
+# ═══════════════════════════════════════════════════════════════
+# TRADE BROADCAST
+#
+# The broadcaster's own dashboard (TOP Bracket Pro Internal B) sends its trades here;
+# every Bracket Pro v2.0 dashboard polls and shows them ("Mark-BUY 2M NQ").
+#
+# State lives in memory on purpose: it is tiny, changes constantly, and must not cost a
+# disk write every 30 seconds. After a server restart the broadcaster's heartbeat puts it
+# back within half a minute.
+#
+# One entry per symbol, so two trades on different instruments can be live at once.
+# An entry that has not had a heartbeat for BROADCAST_STALE_SECONDS is dropped: if the
+# broadcaster's NinjaTrader crashes mid-trade, users see "No Trade" instead of a BUY that
+# may no longer be true.
+# ═══════════════════════════════════════════════════════════════
+import threading
+import time as _time
+
+BROADCAST_SECRET = os.environ.get("BROADCAST_SECRET", "")
+BROADCAST_STALE_SECONDS = 90
+BROADCAST_PRODUCT = "Bracket_Pro_Dashboard"
+
+_broadcast_lock = threading.Lock()
+_broadcast_state = {}            # symbol -> {broadcaster, side, timeframe, symbol, opened, last_seen}
+
+# Readers poll every couple of seconds. Validating their key against the JSON database on
+# every poll would read the whole file each time, so a positive result is cached briefly.
+_reader_cache_lock = threading.Lock()
+_reader_cache = {}               # licence key -> expiry (epoch seconds)
+READER_CACHE_SECONDS = 60
+
+
+class BroadcastIn(BaseModel):
+    secret: str
+    action: str                  # "open" | "heartbeat" | "close"
+    broadcaster: Optional[str] = ""
+    symbol: str
+    timeframe: Optional[str] = ""
+    side: Optional[str] = ""     # "BUY" | "SELL"
+
+
+def _broadcast_live_entries():
+    now = _time.time()
+    with _broadcast_lock:
+        for sym in [k for k, v in _broadcast_state.items() if now - v["last_seen"] > BROADCAST_STALE_SECONDS]:
+            _broadcast_state.pop(sym, None)
+        return [dict(v) for v in _broadcast_state.values()]
+
+
+def _reader_allowed(key: str) -> bool:
+    if not key:
+        return False
+    now = _time.time()
+    with _reader_cache_lock:
+        exp = _reader_cache.get(key)
+        if exp and exp > now:
+            return True
+    db = load_db()
+    _pk, lic = resolve_license(db, key)
+    ok = bool(lic) and lic.get("status") == "active" and BROADCAST_PRODUCT in (lic.get("products") or [])
+    if ok and lic.get("expiry") and lic.get("expiry") != "Never":
+        try:
+            ok = datetime.fromisoformat(lic["expiry"]) > datetime.now()
+        except Exception:
+            pass
+    if ok:
+        with _reader_cache_lock:
+            _reader_cache[key] = now + READER_CACHE_SECONDS
+    return ok
+
+
+@app.post("/api/broadcast")
+async def broadcast_send(msg: BroadcastIn):
+    if not BROADCAST_SECRET or msg.secret != BROADCAST_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid broadcast secret")
+    sym = (msg.symbol or "").strip().upper()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    action = (msg.action or "").strip().lower()
+    now = _time.time()
+    with _broadcast_lock:
+        if action == "close":
+            _broadcast_state.pop(sym, None)
+        elif action in ("open", "heartbeat"):
+            side = (msg.side or "").strip().upper()
+            if side not in ("BUY", "SELL"):
+                raise HTTPException(status_code=400, detail="side must be BUY or SELL")
+            entry = _broadcast_state.get(sym)
+            if entry is None or action == "open":
+                entry = {"symbol": sym, "opened": now}
+            entry.update({
+                "broadcaster": (msg.broadcaster or "").strip()[:30],
+                "side": side,
+                "timeframe": (msg.timeframe or "").strip()[:10],
+                "last_seen": now,
+            })
+            _broadcast_state[sym] = entry
+        else:
+            raise HTTPException(status_code=400, detail="action must be open, heartbeat or close")
+    return {"status": "ok", "live": len(_broadcast_live_entries())}
+
+
+@app.get("/api/broadcast")
+async def broadcast_read(key: str = ""):
+    if not _reader_allowed(key):
+        raise HTTPException(status_code=401, detail="Invalid licence")
+    trades = _broadcast_live_entries()
+    # Oldest first: the first signal published is the one the dashboards show.
+    trades.sort(key=lambda t: t.get("opened", 0))
+    return {"status": "ok", "trades": [
+        {"broadcaster": t.get("broadcaster", ""), "side": t.get("side", ""),
+         "timeframe": t.get("timeframe", ""), "symbol": t.get("symbol", "")}
+        for t in trades]}
+
 # ═══════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════
