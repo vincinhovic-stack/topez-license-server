@@ -1572,12 +1572,17 @@ import threading
 import time as _time
 
 BROADCAST_SECRET = os.environ.get("BROADCAST_SECRET", "")
-BROADCAST_STALE_SECONDS = 5          # client request: users fall back within ~5 s
+BROADCAST_STALE_SECONDS = 12         # silence tolerated before a broadcaster counts as gone.
+                                     # A normal close/switch-off is still instant; this only
+                                     # covers a crash or dead line. 5 s proved too tight on a
+                                     # slower connection (users saw "Connection Issue" mid-trade).
+BROADCAST_TOMBSTONE_SECONDS = 5      # after close/offline, ignore late heartbeats this long
 BROADCAST_LOST_MEMORY_SECONDS = 600  # how long a vanished broadcaster is reported as "lost"
 BROADCAST_PRODUCT = "Bracket_Pro_Dashboard"
 
 _broadcast_lock = threading.Lock()
 _broadcast_trades = {}     # (broadcaster_lower, symbol) -> {broadcaster, side, timeframe, symbol, opened, last_seen}
+_broadcast_closed = {}     # (broadcaster_lower, symbol) or (broadcaster_lower, None) -> time closed / went offline
 _broadcast_presence = {}   # broadcaster_lower -> {"name", "last_seen", "offline": bool}
 
 # Readers poll every couple of seconds. Validating their key against the JSON database on
@@ -1646,15 +1651,26 @@ async def broadcast_send(msg: BroadcastIn):
     now = _time.time()
     with _broadcast_lock:
         # every message from a broadcaster counts as a sign of life, except "offline"
+        for k in [k for k, t in _broadcast_closed.items() if now - t > BROADCAST_TOMBSTONE_SECONDS]:
+            _broadcast_closed.pop(k, None)
+        # a heartbeat that was still on its way when the trade was closed / broadcast switched
+        # off must not bring it back
+        if action in ("presence", "heartbeat") and (who, None) in _broadcast_closed:
+            return {"status": "ok", "ignored": "offline"}
+        if action == "heartbeat" and (who, sym) in _broadcast_closed:
+            action = "presence"
         if action == "offline":
+            _broadcast_closed[(who, None)] = now
             _broadcast_presence[who] = {"name": name, "last_seen": now, "offline": True}
             for k in [k for k in _broadcast_trades if k[0] == who]:
                 _broadcast_trades.pop(k, None)
         elif action in ("presence", "open", "heartbeat", "close"):
             _broadcast_presence[who] = {"name": name, "last_seen": now, "offline": False}
+            _broadcast_closed.pop((who, None), None)
             if action == "close":
                 if sym:
                     _broadcast_trades.pop((who, sym), None)
+                    _broadcast_closed[(who, sym)] = now
             elif action in ("open", "heartbeat"):
                 if not sym:
                     raise HTTPException(status_code=400, detail="symbol required")
@@ -1663,6 +1679,8 @@ async def broadcast_send(msg: BroadcastIn):
                     raise HTTPException(status_code=400, detail="side must be BUY or SELL")
                 key = (who, sym)
                 entry = _broadcast_trades.get(key)
+                if action == "open":
+                    _broadcast_closed.pop(key, None)
                 if entry is None or action == "open":
                     entry = {"symbol": sym, "opened": now}
                 entry.update({"broadcaster": name, "side": side,
