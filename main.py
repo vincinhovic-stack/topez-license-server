@@ -1608,11 +1608,19 @@ def _broadcast_snapshot():
     with _broadcast_lock:
         for k in [k for k, v in _broadcast_trades.items() if now - v["last_seen"] > BROADCAST_STALE_SECONDS]:
             _broadcast_trades.pop(k, None)
+            # the broadcaster went silent WITH a live trade: that is a real connection problem
+            p = _broadcast_presence.get(k[0])
+            if p is not None and not p["offline"]:
+                p["lost_trade"] = True
         for k in [k for k, v in _broadcast_presence.items() if now - v["last_seen"] > BROADCAST_LOST_MEMORY_SECONDS]:
             _broadcast_presence.pop(k, None)
         online = any(not p["offline"] and now - p["last_seen"] <= BROADCAST_STALE_SECONDS
                      for p in _broadcast_presence.values())
-        lost = (not online) and any(not p["offline"] and now - p["last_seen"] > BROADCAST_STALE_SECONDS
+        # "Connection Issue" only when a broadcaster vanished in the middle of a trade.
+        # Someone who was flat and disappears (closed NinjaTrader, renamed) just means
+        # "No Broadcast": there is no open trade the users could be missing an update for.
+        lost = (not online) and any(not p["offline"] and p.get("lost_trade")
+                                    and now - p["last_seen"] > BROADCAST_STALE_SECONDS
                                     for p in _broadcast_presence.values())
         trades = sorted((dict(v) for v in _broadcast_trades.values()), key=lambda t: t.get("opened", 0))
     return trades, online, lost
