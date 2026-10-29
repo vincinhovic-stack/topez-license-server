@@ -407,6 +407,17 @@ async def admin_dashboard(request: Request, view: str = ""):
             f'<button class="btn-primary" type="submit" style="font-size:11px;padding:3px 10px;margin-top:4px">Save</button>'
             f'</form>'
         )
+        if BROADCAST_PRODUCT in current_products:
+            _bu = str(lic.get("broadcast_until") or "")[:10]
+            _bc = "#0f0" if broadcast_subscribed(lic) else "#f66"
+            products_html += (
+                f'<form method="POST" action="/admin/set-broadcast" style="margin:6px 0 0 0">'
+                f'<input type="hidden" name="key" value="{key}">'
+                f'<div style="font-size:10px;color:{_bc}">Live Broadcast until</div>'
+                f'<input type="date" name="broadcast_until" value="{_bu}" style="font-size:10px;padding:1px">'
+                f'<button class="btn-primary" type="submit" style="font-size:10px;padding:2px 6px;margin-left:3px">Set</button>'
+                f'</form>'
+            )
         # Copy-paste download links for this license (one per available product file)
         if available_slots:
             link_fields = ""
@@ -570,6 +581,20 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 </div>
 <a href="/admin/keap/connect"><button class="btn-primary">{'Reconnect' if keap_connected else 'Connect'} Keap</button></a>
 </div>
+</div>
+<!-- Trade Broadcast -->
+<h2>Live Trade Broadcast</h2>
+<div class="section">
+<form method="POST" action="/admin/broadcast-settings">
+<div class="form-row">
+<div class="form-group" style="flex:1">
+<label>Subscription page (opens when a user clicks "Live Broadcast: Subscribe")</label>
+<input type="url" name="subscribe_url" value="{settings.get('broadcast_subscribe_url', '')}" placeholder="https://..." style="width:100%">
+</div>
+<button class="btn-primary" type="submit">Save</button>
+</div>
+</form>
+<div style="font-size:12px;color:#aaa;margin-top:8px">Keap HTTP Post for every paid period: <code>{BASE_URL}/api/keap/broadcast-subscription?plan=monthly|quarterly|yearly&amp;token=...</code> with the contact's email. The date per licence is in the Products column.</div>
 </div>
 <!-- Product Files -->
 <h2>Product Files (for delivery)</h2>
@@ -1441,6 +1466,11 @@ def merge_into(keep_rec: dict, keep_key: str, surplus_key: str, surplus_rec: dic
         prev = str(keep_rec.get("notes") or "")
         keep_rec["notes"] = (prev + " | displaced machine lock(s): " + ", ".join(displaced)).strip(" |")
 
+    # keep the later Live Broadcast date of the two
+    ba, bb = keep_rec.get("broadcast_until"), surplus_rec.get("broadcast_until")
+    if bb and (not ba or str(bb) > str(ba)):
+        keep_rec["broadcast_until"] = bb
+
     # keep the most recent activity stamp of the two
     a, b = keep_rec.get("last_check"), surplus_rec.get("last_check")
     if b and (not a or b > a):
@@ -1626,14 +1656,61 @@ def _broadcast_snapshot():
     return trades, online, lost
 
 
-def _reader_allowed(key: str) -> bool:
-    if not key:
+# ── Trade Broadcast subscription (Milestone 8) ──
+# A licence receives the live broadcast while its "broadcast_until" date (YYYY-MM-DD,
+# inclusive) has not passed. Licences that had Bracket Pro when this went live get the
+# free period below once (grandfathering). New licences start without it and need a
+# subscription. Every paid subscription period moves the date forward.
+BROADCAST_FREE_UNTIL = "2026-12-31"
+BROADCAST_PLANS = {"monthly": 1, "quarterly": 3, "yearly": 12}
+BROADCAST_DEDUPE_MINUTES = 15
+
+
+def _add_months(d, months: int):
+    y, m = divmod(d.month - 1 + months, 12)
+    y += d.year
+    m += 1
+    import calendar
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return d.replace(year=y, month=m, day=day)
+
+
+def broadcast_subscribed(lic: dict) -> bool:
+    until = (lic or {}).get("broadcast_until")
+    if not until:
         return False
+    try:
+        return datetime.fromisoformat(str(until)[:10]).date() >= datetime.now().date()
+    except Exception:
+        return False
+
+
+def broadcast_grandfather_once():
+    """Runs once: every licence that has Bracket Pro right now gets the free period."""
+    db = load_db()
+    st = db.setdefault("settings", {})
+    if st.get("broadcast_grandfathered"):
+        return
+    n = 0
+    for rec in db.get("licenses", {}).values():
+        if BROADCAST_PRODUCT in (rec.get("products") or []) and not rec.get("broadcast_until"):
+            rec["broadcast_until"] = BROADCAST_FREE_UNTIL
+            n += 1
+    st["broadcast_grandfathered"] = datetime.now().isoformat()
+    save_db(db)
+    print(f"Broadcast: free period until {BROADCAST_FREE_UNTIL} given to {n} existing Bracket Pro licence(s)")
+
+
+def _reader_status(key: str) -> str:
+    """'ok' = may see the broadcast, 'not_subscribed' = valid Bracket Pro licence without an
+    active subscription, 'invalid' = no valid Bracket Pro licence at all."""
+    if not key:
+        return "invalid"
     now = _time.time()
     with _reader_cache_lock:
-        exp = _reader_cache.get(key)
-        if exp and exp > now:
-            return True
+        hit = _reader_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
     db = load_db()
     _pk, lic = resolve_license(db, key)
     ok = bool(lic) and lic.get("status") == "active" and BROADCAST_PRODUCT in (lic.get("products") or [])
@@ -1642,10 +1719,16 @@ def _reader_allowed(key: str) -> bool:
             ok = datetime.fromisoformat(lic["expiry"]) > datetime.now()
         except Exception:
             pass
-    if ok:
+    status = "invalid" if not ok else ("ok" if broadcast_subscribed(lic) else "not_subscribed")
+    if status != "invalid":
         with _reader_cache_lock:
-            _reader_cache[key] = now + READER_CACHE_SECONDS
-    return ok
+            _reader_cache[key] = (now + READER_CACHE_SECONDS, status)
+    return status
+
+
+def _reader_cache_clear():
+    with _reader_cache_lock:
+        _reader_cache.clear()
 
 
 @app.post("/api/broadcast")
@@ -1699,10 +1782,107 @@ async def broadcast_send(msg: BroadcastIn):
     return {"status": "ok"}
 
 
+@app.post("/api/keap/broadcast-subscription")
+async def keap_broadcast_subscription(request: Request, plan: str = "monthly", token: str = ""):
+    """Called by a Keap campaign (HTTP Post) for EVERY paid subscription period, first
+    purchase and each renewal. Moves the customer's broadcast date forward by the plan
+    length, counted from today or from the current date if that is later. A subscription
+    that is not renewed simply runs out on its date - nothing to cancel on the server."""
+    supplied = token or request.headers.get("X-Provision-Token", "")
+    if PROVISION_SECRET and supplied != PROVISION_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid provision token")
+    plan = (plan or "").strip().lower()
+    months = BROADCAST_PLANS.get(plan)
+    if not months:
+        raise HTTPException(status_code=400, detail=f"Unknown plan {plan!r} (monthly, quarterly, yearly)")
+    email = ""
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            email = body.get("email") or body.get("Email") or ""
+    except:
+        try:
+            form = await request.form()
+            email = form.get("email", "") or form.get("Email", "")
+        except:
+            pass
+    if not email:
+        email = request.query_params.get("email", "")
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    db = load_db()
+    key, rec = find_existing_license(db, email, [BROADCAST_PRODUCT])
+    if not rec:
+        raise HTTPException(status_code=404, detail=f"No active Bracket Pro licence for {email}")
+    # Keap sometimes repeats an HTTP Post: the same plan again within a few minutes is ignored
+    last = rec.get("broadcast_last_extend") or {}
+    try:
+        recent = (last.get("plan") == plan and
+                  datetime.now() - datetime.fromisoformat(last.get("at")) < timedelta(minutes=BROADCAST_DEDUPE_MINUTES))
+    except Exception:
+        recent = False
+    if recent:
+        return {"status": "ok", "key": key, "broadcast_until": rec.get("broadcast_until"), "duplicate": True}
+    today = datetime.now().date()
+    try:
+        current = datetime.fromisoformat(str(rec.get("broadcast_until"))[:10]).date()
+    except Exception:
+        current = None
+    base = current if current and current > today else today
+    rec["broadcast_until"] = _add_months(base, months).isoformat()
+    rec["broadcast_last_extend"] = {"plan": plan, "at": datetime.now().isoformat()}
+    save_db(db)
+    _reader_cache_clear()
+    print(f"Broadcast: {email} ({key}) +{plan} -> {rec['broadcast_until']}")
+    return {"status": "ok", "key": key, "broadcast_until": rec["broadcast_until"]}
+
+
+@app.post("/admin/set-broadcast")
+async def admin_set_broadcast(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+    form = await request.form()
+    key = form.get("key")
+    until = (form.get("broadcast_until") or "").strip()
+    db = load_db()
+    if key in db["licenses"]:
+        if until:
+            try:
+                datetime.fromisoformat(until)
+                db["licenses"][key]["broadcast_until"] = until[:10]
+            except Exception:
+                pass
+        else:
+            db["licenses"][key].pop("broadcast_until", None)
+        save_db(db)
+        _reader_cache_clear()
+    return RedirectResponse(url="/admin", status_code=303)
+
+
+@app.post("/admin/broadcast-settings")
+async def admin_broadcast_settings(request: Request):
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in active_sessions:
+        return RedirectResponse(url="/admin/login")
+    form = await request.form()
+    db = load_db()
+    db.setdefault("settings", {})["broadcast_subscribe_url"] = (form.get("subscribe_url") or "").strip()
+    save_db(db)
+    return RedirectResponse(url="/admin", status_code=303)
+
+
 @app.get("/api/broadcast")
 async def broadcast_read(key: str = ""):
-    if not _reader_allowed(key):
+    status = _reader_status(key)
+    if status == "invalid":
         raise HTTPException(status_code=401, detail="Invalid licence")
+    if status == "not_subscribed":
+        # Same shape as a quiet feed, so dashboards older than v2.2 simply show "No Broadcast".
+        url = (load_db().get("settings", {}).get("broadcast_subscribe_url") or "").strip()
+        return {"status": "not_subscribed", "online": False, "lost": False, "trades": [],
+                "subscribe_url": url}
     trades, online, lost = _broadcast_snapshot()
     return {"status": "ok", "online": online, "lost": lost, "trades": [
         {"broadcaster": t.get("broadcaster", ""), "side": t.get("side", ""),
@@ -1718,3 +1898,11 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@app.on_event("startup")
+async def _broadcast_startup():
+    try:
+        broadcast_grandfather_once()
+    except Exception as e:
+        print(f"Broadcast grandfathering failed: {e}")
