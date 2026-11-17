@@ -33,11 +33,12 @@ BASE_URL = os.environ.get("BASE_URL", "https://web-production-272d8.up.railway.a
 # NOTE: /api/validate is product-agnostic — it only checks whether a requested
 # product_id is present in a license's own "products" list. This list only drives
 # the admin UI checkboxes; it is not a global gate on validation.
-KNOWN_PRODUCTS = ["ME_Dashboard", "HFT_Dashboard", "Bracket_Pro_Dashboard"]
+KNOWN_PRODUCTS = ["ME_Dashboard", "HFT_Dashboard", "Bracket_Pro_Dashboard", "TriggerLine_Dashboard"]
 PRODUCT_LABELS = {
     "ME_Dashboard": "ME Dashboard",
     "HFT_Dashboard": "HFT Dashboard",
     "Bracket_Pro_Dashboard": "Bracket Pro",
+    "TriggerLine_Dashboard": "TriggerLine",
 }
 # Products pre-checked when creating a new license (business default).
 # Bracket Pro is intentionally NOT pre-checked until the subscription model is
@@ -85,6 +86,8 @@ DOWNLOAD_LABELS = {
     "TS_Dollars_Profit": "Bracket Pro Dollars Profit Indicator (TradeStation)",
     "TS_Guide": "Bracket Pro User Guide - TradeStation (PDF)",
     "PDF_Guides": "ME + HFT Dashboard User Guides (PDF)",
+    "NT8_TriggerLine": "TriggerLine Dashboard (NinjaTrader 8)",
+    "TS_TriggerLine": "TriggerLine Dashboard (TradeStation)",
 }
 
 # Authorize.net
@@ -130,7 +133,9 @@ def load_db():
                 "TS_Dollars_Profit": "",
                 "TS_Guide": "",
                 "PDF_Guides": "",
-                "Bracket_Pro_Guide": ""
+                "Bracket_Pro_Guide": "",
+                "NT8_TriggerLine": "",
+                "TS_TriggerLine": ""
             },
             "product_files_updated": {}
         }
@@ -366,6 +371,8 @@ async def admin_dashboard(request: Request, view: str = ""):
         "TS_Guide": "Bracket Pro Guide - TradeStation (PDF)",
         "PDF_Guides": "ME + HFT Guides (PDF)",
         "Bracket_Pro_Guide": "Bracket Pro Guide - NinjaTrader 8 (PDF)",
+        "NT8_TriggerLine": "NT8 TriggerLine",
+        "TS_TriggerLine": "TS TriggerLine",
     }
     available_slots = [
         slot for slot in DOWNLOAD_SLOT_LABELS
@@ -707,6 +714,24 @@ input, select {{ padding: 8px; border: 1px solid #333; border-radius: 4px; backg
 <button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
 </form>
 </div>
+<div class="file-card">
+<h4>NT8 TriggerLine Dashboard</h4>
+<div class="file-status">{file_status.get('NT8_TriggerLine', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="NT8_TriggerLine">
+<input type="file" name="file" accept=".zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
+<div class="file-card">
+<h4>TS TriggerLine Dashboard</h4>
+<div class="file-status">{file_status.get('TS_TriggerLine', '❌')}</div>
+<form method="POST" action="/admin/upload-product" enctype="multipart/form-data">
+<input type="hidden" name="product_key" value="TS_TriggerLine">
+<input type="file" name="file" accept=".eld,.zip" style="font-size:12px;margin:5px 0">
+<button class="btn-primary" type="submit" style="font-size:12px;padding:4px 12px">Upload</button>
+</form>
+</div>
 </div>
 <!-- Create License -->
 <h2>Create New License</h2>
@@ -915,7 +940,7 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in active_sessions:
         return RedirectResponse(url="/admin/login")
-    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "TS", "TS_Bracket_Pro", "TS_Market_Energy", "TS_Dollars_Profit", "TS_Guide", "PDF_Guides", "Bracket_Pro_Guide"]
+    valid_keys = ["NT8_ME", "NT8_HFT", "NT8_Bracket_Pro", "NT8_Market_Energy", "Bracket_Pro_DP", "TS", "TS_Bracket_Pro", "TS_Market_Energy", "TS_Dollars_Profit", "TS_Guide", "PDF_Guides", "Bracket_Pro_Guide", "NT8_TriggerLine", "TS_TriggerLine"]
     if product_key not in valid_keys:
         return RedirectResponse(url="/admin", status_code=303)
     # Save file with friendly names
@@ -931,7 +956,9 @@ async def upload_product(request: Request, product_key: str = Form(...), file: U
         "TS_Dollars_Profit": "TOPEZ_Dollars_Profit_TS.eld",
         "TS_Guide": "TOPEZ_Bracket_Pro_Guide_TS.pdf",
         "PDF_Guides": "TOPEZ_PDF_Guides.zip",
-        "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
+        "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf",
+        "NT8_TriggerLine": "TOPEZDashboard_TriggerLine.zip",
+        "TS_TriggerLine": "TOPEZ_TriggerLine_TS.eld"
     }
     filename = upload_names.get(product_key, f"{product_key}.zip")
     filepath = os.path.join(UPLOADS_DIR, filename)
@@ -992,7 +1019,9 @@ async def download_product(product_key: str, key: str = ""):
         "TS_Dollars_Profit": "TOPEZ_Dollars_Profit_TS.eld",
         "TS_Guide": "TOPEZ_Bracket_Pro_Guide_TS.pdf",
         "PDF_Guides": "TOPEZ_PDF_Guides.zip",
-        "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf"
+        "Bracket_Pro_Guide": "TOPEZDashboard_Bracket_Pro_Guide.pdf",
+        "NT8_TriggerLine": "TOPEZDashboard_TriggerLine.zip",
+        "TS_TriggerLine": "TOPEZ_TriggerLine_TS.eld"
     }
     friendly_name = download_names.get(product_key, filename)
     _fn = friendly_name.lower()
