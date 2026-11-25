@@ -1973,7 +1973,7 @@ def _report_send(to_list, subject, files):
     msg["From"] = SMTP_FROM or SMTP_USER
     msg["To"] = ", ".join(to_list)
     names = ", ".join(f for f, _ in files)
-    msg.attach(MIMEText(f"Attached: {names}\n\nSent automatically by the Account Balance Export app.", "plain"))
+    msg.attach(MIMEText(f"Attached: {names}\n\nSent automatically by TradeStation (TopTradeTools report apps).", "plain"))
     for fname, content in files:
         part = MIMEBase("text", "csv")
         part.set_payload(content.encode("utf-8"))
@@ -2006,7 +2006,7 @@ async def report_mail(request: Request):
     files = _report_split_files(body.decode("utf-8", errors="replace"))
     if not files:
         raise HTTPException(status_code=400, detail="No file in the report")
-    subject = _re.sub(r"[\r\n]+", " ", request.headers.get("x-report-subject", "")).strip()[:150] or "Account Balance Export"
+    subject = _re.sub(r"[\r\n]+", " ", request.headers.get("x-report-subject", "")).strip()[:150] or "TradeStation report"
     try:
         await _asyncio.to_thread(_report_send, to_list, subject, files)
     except Exception as e:
