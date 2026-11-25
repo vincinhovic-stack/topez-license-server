@@ -1921,6 +1921,101 @@ async def broadcast_read(key: str = ""):
 # ═══════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# REPORT MAIL (Account Balance Export app: emails the CSV files once a day)
+# The TradeStation app cannot send emails itself, so it posts the CSV text here and the server
+# sends it with the SMTP settings above. Raw text body (no JSON, so the app needs no escaping):
+#   header X-Report-Secret  = REPORT_MAIL_SECRET
+#   header X-Report-To      = one or more addresses separated by commas
+#   header X-Report-Subject = subject (optional)
+#   body: one or more files, each starting with a line  ===FILE:<name>.csv===
+# ═══════════════════════════════════════════════════════════════
+import re as _re
+import asyncio as _asyncio
+
+REPORT_MAIL_SECRET = os.environ.get("REPORT_MAIL_SECRET", "")
+REPORT_MAX_BYTES = 2_000_000
+REPORT_MAX_TO = 10
+_REPORT_EMAIL_RE = _re.compile(r"^[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[^@\s,;<>\"']+$")
+_REPORT_FILE_RE = _re.compile(r"^===FILE:([^=\r\n]{1,120})===\s*$")
+
+
+def _report_split_files(text: str):
+    """[(filename, content)] from the posted body; text before the first marker is ignored."""
+    files, name, lines = [], None, []
+    for line in text.splitlines():
+        m = _REPORT_FILE_RE.match(line.strip())
+        if m:
+            if name is not None:
+                files.append((name, lines))
+            name, lines = m.group(1).strip(), []
+        elif name is not None:
+            lines.append(line)
+    if name is not None:
+        files.append((name, lines))
+    out = []
+    for fname, flines in files:
+        safe = _re.sub(r"[^A-Za-z0-9_.\- ]", "_", fname).strip() or "report.csv"
+        if not safe.lower().endswith(".csv"):
+            safe += ".csv"
+        out.append((safe, "\r\n".join(flines).strip("\r\n") + "\r\n"))
+    return out
+
+
+def _report_send(to_list, subject, files):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.base import MIMEBase
+    from email import encoders
+    msg = MIMEMultipart()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["To"] = ", ".join(to_list)
+    names = ", ".join(f for f, _ in files)
+    msg.attach(MIMEText(f"Attached: {names}\n\nSent automatically by the Account Balance Export app.", "plain"))
+    for fname, content in files:
+        part = MIMEBase("text", "csv")
+        part.set_payload(content.encode("utf-8"))
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename=fname)
+        msg.attach(part)
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg, to_addrs=to_list)
+
+
+@app.post("/api/report-mail")
+async def report_mail(request: Request):
+    if not REPORT_MAIL_SECRET or not secrets.compare_digest(request.headers.get("x-report-secret", ""), REPORT_MAIL_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid report secret")
+    if not SMTP_HOST or not SMTP_USER:
+        raise HTTPException(status_code=503, detail="SMTP not configured")
+    to_list = [a.strip() for a in request.headers.get("x-report-to", "").replace(";", ",").split(",") if a.strip()]
+    if not to_list:
+        raise HTTPException(status_code=400, detail="No email address")
+    if len(to_list) > REPORT_MAX_TO:
+        raise HTTPException(status_code=400, detail=f"At most {REPORT_MAX_TO} email addresses")
+    bad = [a for a in to_list if not _REPORT_EMAIL_RE.match(a)]
+    if bad:
+        raise HTTPException(status_code=400, detail="Invalid email address: " + ", ".join(bad)[:200])
+    body = await request.body()
+    if len(body) > REPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Report too large")
+    files = _report_split_files(body.decode("utf-8", errors="replace"))
+    if not files:
+        raise HTTPException(status_code=400, detail="No file in the report")
+    subject = _re.sub(r"[\r\n]+", " ", request.headers.get("x-report-subject", "")).strip()[:150] or "Account Balance Export"
+    try:
+        await _asyncio.to_thread(_report_send, to_list, subject, files)
+    except Exception as e:
+        print(f"Report mail error: {e}")
+        raise HTTPException(status_code=502, detail="Sending failed: " + str(e)[:200])
+    print(f"Report mail sent to {', '.join(to_list)} ({len(files)} file(s))")
+    return {"status": "sent", "to": len(to_list), "files": len(files)}
+
+
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "TOP EZ License Server", "version": "4.0"}
